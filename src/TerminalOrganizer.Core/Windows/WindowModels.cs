@@ -435,7 +435,19 @@ namespace TerminalOrganizer.Core.Windows
         /// never sees the rules), and each snapshot carries the rule outcome of its window. A null rule set
         /// means no rules at all (preset off).
         /// </summary>
+        // @MX:NOTE: one breaker state per compose (SPEC-RULES-010): a regex rule that times out twice is skipped for the rest of the call and nothing carries to the next one.
         public static WindowSnapshot[] Compose(AcquiredWindow[] windows, SessionRecord[] sessions, RuleSet rules)
+        {
+            return Compose(windows, sessions, rules, null);
+        }
+
+        /// <summary>
+        /// Composes with a rule set and a caller-supplied breaker state shared by every window and tab of
+        /// the call; the state is neither reset nor discarded. A null state becomes a fresh state for this
+        /// call, which is exactly the three-argument overload.
+        /// </summary>
+        // @MX:NOTE: the seam for a later cross-compose cache: a caller that keeps one state across calls carries its trips with it (SPEC-RULES-010).
+        public static WindowSnapshot[] Compose(AcquiredWindow[] windows, SessionRecord[] sessions, RuleSet rules, RuleEvaluationState state)
         {
             List<WindowSnapshot> snapshots = new List<WindowSnapshot>();
             if (windows == null)
@@ -443,6 +455,7 @@ namespace TerminalOrganizer.Core.Windows
                 return snapshots.ToArray();
             }
             RuleSet effectiveRules = rules ?? RuleSetBuilder.Build(null, false);
+            RuleEvaluationState scope = state ?? new RuleEvaluationState();
             foreach (AcquiredWindow window in windows)
             {
                 if (window == null)
@@ -451,7 +464,7 @@ namespace TerminalOrganizer.Core.Windows
                 }
                 WindowMatchResult match = SessionMatcher.Match(ResolveTitles(window.Titles), sessions);
                 string windowTitle = window.Identity == null ? null : window.Identity.RawWindowTitle;
-                WindowRuleOutcome outcome = RuleEvaluator.EvaluateWindow(effectiveRules, match.Tabs, windowTitle);
+                WindowRuleOutcome outcome = RuleEvaluator.EvaluateWindow(effectiveRules, match.Tabs, windowTitle, scope);
                 snapshots.Add(new WindowSnapshot(window.Identity, window.Monitor, window.DesktopStatus,
                     match.Tabs, match.Identified, match.UnmatchedTitles, match.Mergeable,
                     window.Titles == null ? TabReadQuality.Fallback : window.Titles.Quality, outcome));

@@ -134,6 +134,53 @@ namespace TerminalOrganizer.Core.Monitors
         }
 
         /// <summary>
+        /// The hinted selection (SPEC-MON-011 REQ-HIN-001, REQ-HIN-002): the entry of Decide, without
+        /// the rule that decided it.
+        /// </summary>
+        // @MX:NOTE: [AUTO] Hinted overload of the 3-argument Select; Decide holds the logic and the rule.
+        public static AppliedLayoutEntry Select(AppliedLayoutsDocument document, MonitorIdentity identity, string currentDesktop, LiveRowHint hint)
+        {
+            return Decide(document, identity, currentDesktop, hint).Entry;
+        }
+
+        /// <summary>
+        /// The hinted selection with its deciding rule (SPEC-MON-011 REQ-HIN-001..004). When a hint is
+        /// supplied and the current desktop is known, the first instance-exact row (document order) whose
+        /// monitor-number equals the hint number and whose serial-number equals the hint serial ordinally
+        /// is chosen under LiveHint; the identity's own number and serial are not consulted. Otherwise the
+        /// result is exactly the 3-argument Select result (a row or null): DocumentOrder when the hint is
+        /// absent or the desktop is null or empty, HintUnmatched when no instance-exact row carries the
+        /// pair. Pure: the document is not mutated and rejected entries are never considered.
+        /// </summary>
+        // @MX:NOTE: [AUTO] The hint chooses only among instance-exact rows; the 3-argument Select above stays the
+        // fallback and is not edited (fan_in rises: resolver, three tools, tests).
+        public static SelectionDecision Decide(AppliedLayoutsDocument document, MonitorIdentity identity, string currentDesktop, LiveRowHint hint)
+        {
+            if (document == null)
+            {
+                throw new ArgumentNullException("document");
+            }
+            if (identity == null)
+            {
+                throw new ArgumentNullException("identity");
+            }
+            if (hint == null || string.IsNullOrEmpty(currentDesktop))
+            {
+                return new SelectionDecision(Select(document, identity, currentDesktop), SelectionRule.DocumentOrder);
+            }
+            foreach (AppliedLayoutEntry candidate in document.Entries)
+            {
+                if (InstanceExact(candidate.Device, identity, currentDesktop)
+                    && candidate.Device.MonitorNumber == hint.Number
+                    && string.Equals(candidate.Device.SerialNumber ?? string.Empty, hint.Serial, StringComparison.Ordinal))
+                {
+                    return new SelectionDecision(candidate, SelectionRule.LiveHint);
+                }
+            }
+            return new SelectionDecision(Select(document, identity, currentDesktop), SelectionRule.HintUnmatched);
+        }
+
+        /// <summary>
         /// The REQ-VDT-002 single-entry rule over one tier with the desktop field ignored:
         /// exactly one match is the match; zero or several yield null.
         /// </summary>
@@ -156,5 +203,35 @@ namespace TerminalOrganizer.Core.Monitors
             }
             return single;
         }
+    }
+
+    /// <summary>Why a hinted selection returned its result (SPEC-MON-011 REQ-HIN-004). There is no rule for "no entry".</summary>
+    public enum SelectionRule
+    {
+        /// <summary>A hint matched an instance-exact row.</summary>
+        LiveHint,
+
+        /// <summary>A hint was supplied, the desktop is known, and no instance-exact row carried the pair; the result is the 3-argument result.</summary>
+        HintUnmatched,
+
+        /// <summary>No hint was supplied or the desktop is null or empty; the result is the 3-argument result.</summary>
+        DocumentOrder
+    }
+
+    /// <summary>The entry a hinted selection chose (null when none) and the one rule that decided it (REQ-HIN-004).</summary>
+    public sealed class SelectionDecision
+    {
+        private readonly AppliedLayoutEntry entry;
+        private readonly SelectionRule rule;
+
+        public SelectionDecision(AppliedLayoutEntry entry, SelectionRule rule)
+        {
+            this.entry = entry;
+            this.rule = rule;
+        }
+
+        public AppliedLayoutEntry Entry { get { return entry; } }
+
+        public SelectionRule Rule { get { return rule; } }
     }
 }

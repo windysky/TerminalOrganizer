@@ -313,8 +313,6 @@ $enumerator = New-Object TerminalOrganizer.Core.Windows.Win32WindowEnumerator
 $sessionQuery = New-Object TerminalOrganizer.Core.Windows.ProcessSessionQuery
 $stateReader = New-Object TerminalOrganizer.Core.Assignment.WindowStateReader
 $fancyZonesDir = Join-Path $env:LOCALAPPDATA 'Microsoft\PowerToys\FancyZones'
-$appliedPath = Join-Path $fancyZonesDir 'applied-layouts.json'
-$customPath = Join-Path $fancyZonesDir 'custom-layouts.json'
 
 $desktopSrc = [TerminalOrganizer.App.CurrentDesktopSource] {
     $win10 = $desktopReader.TryReadWin10SessionValue()
@@ -324,24 +322,13 @@ $desktopSrc = [TerminalOrganizer.App.CurrentDesktopSource] {
     $null
 }
 
+# SPEC-MON-011 REQ-TOOL-002: the app's own resolver (applied row chosen with the FancyZones log hint); the
+# decision line goes to the console so a run shows which rule picked the row.
+$resolverLog = [Action[string]] { param($line) [Console]::Out.WriteLine('resolver: ' + $line) }
+$layoutResolver = New-Object TerminalOrganizer.App.AppliedLayoutResolver -ArgumentList $fancyZonesDir, $resolverLog
 $layoutRes = [TerminalOrganizer.App.LayoutResolution] {
     param($monitor, $desktop)
-    if (-not (Test-Path -LiteralPath $appliedPath)) {
-        return [TerminalOrganizer.Core.Layouts.LayoutResult]::Unsupported([TerminalOrganizer.Core.Layouts.LayoutReason]::NoAppliedLayout, $null, $null, $null)
-    }
-    $appliedJson = [IO.File]::ReadAllText($appliedPath)
-    $customJson = ''
-    if (Test-Path -LiteralPath $customPath) { $customJson = [IO.File]::ReadAllText($customPath) }
-    $document = [TerminalOrganizer.Core.Layouts.FancyZonesJsonReader]::ParseAppliedLayouts($appliedJson)
-    if (-not $document.IsValid) {
-        return [TerminalOrganizer.Core.Layouts.LayoutResult]::Invalid([TerminalOrganizer.Core.Layouts.LayoutReason]::MalformedJson, $document.Detail, $null)
-    }
-    $entry = [TerminalOrganizer.Core.Monitors.AppliedEntrySelector]::Select($document, $monitor.ToIdentity(), $desktop)
-    if ($null -eq $entry) {
-        return [TerminalOrganizer.Core.Layouts.LayoutResult]::Unsupported([TerminalOrganizer.Core.Layouts.LayoutReason]::NoAppliedLayout, $null, $null, $null)
-    }
-    $context = [TerminalOrganizer.Core.Monitors.OrganizerContext]::Build($entry, $monitor)
-    [TerminalOrganizer.Core.Layouts.LayoutResolver]::ResolveByDeviceKey($appliedJson, $customJson, $context.Key, $context.WorkArea)
+    $layoutResolver.Resolve($monitor, $desktop)
 }
 
 $windowDisc = [TerminalOrganizer.App.WindowDiscovery] {

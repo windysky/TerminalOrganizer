@@ -793,3 +793,481 @@ Describe 'AC-010 No user-visible change (standing guards)' {
         }
     }
 }
+
+# --- SPEC-RULES-010: per-compose regex-timeout breaker (M1: state type, evaluator overloads, breaker semantics) ---
+# Expected values come from SPEC-RULES-010 acceptance.md and plan.md section J, never from the code under test.
+# No assertion reads a clock or an elapsed time; every assertion counts diagnostics or state counters.
+
+$H10 = ('a' * 30) + 'b'
+$EXEC10 = 'regex timeout'
+$SKIP10 = 'regex timeout (skipped after repeated timeouts)'
+
+function New-State10 {
+    New-Object TerminalOrganizer.Core.Rules.RuleEvaluationState
+}
+
+function New-Tabs10([string[]]$Titles) {
+    $list = New-Object 'System.Collections.Generic.List[TerminalOrganizer.Core.Windows.TabSnapshot]'
+    foreach ($t in $Titles) {
+        $list.Add((New-Object TerminalOrganizer.Core.Windows.TabSnapshot -ArgumentList $t, $t, $null))
+    }
+    , $list.ToArray()
+}
+
+function Count-Reason10($Diagnostics, [string]$Reason) {
+    @(@($Diagnostics) | Where-Object { $_.Reason -ceq $Reason }).Count
+}
+
+Describe 'SPEC-RULES-010 AC-004 standalone window and tab evaluation' {
+    It 'the three-argument window entry shares one fresh state across the tabs of the window' {
+        $rs = Build-Rules ([object[]]@(@{ match = 'regex:^(a+)+$'; rank = 7 }))
+        $o = [TerminalOrganizer.Core.Rules.RuleEvaluator]::EvaluateWindow($rs, (New-Tabs10 @($H10, $H10, 'aaa')), 'window title')
+        @($o.Diagnostics).Count | Should Be 3
+        $o.Diagnostics[0].Reason | Should BeExactly $EXEC10
+        $o.Diagnostics[1].Reason | Should BeExactly $EXEC10
+        $o.Diagnostics[2].Reason | Should BeExactly $SKIP10
+        $o.IdentityName | Should BeExactly $H10
+        ($null -eq $o.Rank) | Should Be $true
+        ($null -eq $o.Reference) | Should Be $true
+    }
+
+    It 'the three-argument tab entry stays stateless: three separate calls give 1, 1 and 0 diagnostics and the third matches' {
+        $rs = Build-Rules ([object[]]@(@{ match = 'regex:^(a+)+$'; rank = 7 }))
+        $r1 = Eval-Tab $rs $H10
+        $r2 = Eval-Tab $rs $H10
+        $r3 = Eval-Tab $rs 'aaa'
+        @($r1.Diagnostics).Count | Should Be 1
+        @($r2.Diagnostics).Count | Should Be 1
+        @($r3.Diagnostics).Count | Should Be 0
+        $r1.Diagnostics[0].Reason | Should BeExactly $EXEC10
+        $r2.Diagnostics[0].Reason | Should BeExactly $EXEC10
+        $r3.Matched | Should Be $true
+        $r3.Rank | Should Be 7
+        $r3.Reference | Should BeExactly 'rule 1: regex:^(a+)+$'
+    }
+
+    It 'the four-argument window entry uses the supplied state and keeps it between calls' {
+        $rs = Build-Rules ([object[]]@(@{ match = 'regex:^(a+)+$'; rank = 7 }))
+        $s = New-State10
+        $o = [TerminalOrganizer.Core.Rules.RuleEvaluator]::EvaluateWindow($rs, (New-Tabs10 @($H10, $H10, 'aaa')), 'window title', $s)
+        @($o.Diagnostics).Count | Should Be 3
+        $s.TimeoutCount | Should Be 2
+        $s.SkippedCount | Should Be 1
+        $s.TrippedCount | Should Be 1
+        $again = [TerminalOrganizer.Core.Rules.RuleEvaluator]::EvaluateWindow($rs, (New-Tabs10 @($H10)), 'window title', $s)
+        @($again.Diagnostics).Count | Should Be 1
+        $again.Diagnostics[0].Reason | Should BeExactly $SKIP10
+        $s.TimeoutCount | Should Be 2
+        $s.SkippedCount | Should Be 2
+    }
+
+    It 'a second three-argument window call starts with a fresh state' {
+        $rs = Build-Rules ([object[]]@(@{ match = 'regex:^(a+)+$'; rank = 7 }))
+        [void][TerminalOrganizer.Core.Rules.RuleEvaluator]::EvaluateWindow($rs, (New-Tabs10 @($H10, $H10, 'aaa')), 'window title')
+        $next = [TerminalOrganizer.Core.Rules.RuleEvaluator]::EvaluateWindow($rs, (New-Tabs10 @($H10)), 'window title')
+        @($next.Diagnostics).Count | Should Be 1
+        $next.Diagnostics[0].Reason | Should BeExactly $EXEC10
+    }
+}
+
+Describe 'SPEC-RULES-010 AC-006 null and empty inputs (evaluator)' {
+    It 'the four-argument evaluator entries never throw and equal the three-argument results; the state stays at 0, 0, 0' {
+        $rules = Build-Rules (New-RuleListU)
+        $s = New-State10
+        $none = [TerminalOrganizer.Core.Windows.TabSnapshot[]]@()
+        $withNull = New-Object 'TerminalOrganizer.Core.Windows.TabSnapshot[]' 1
+        $ev = [TerminalOrganizer.Core.Rules.RuleEvaluator]
+        $caught = $null
+        try {
+            $t1 = $ev::EvaluateTab($null, 'x', $null, $s)
+            $t2 = $ev::EvaluateTab($rules, $null, $null, $s)
+            $t3 = $ev::EvaluateTab($rules, 'x', $null, $null)
+            $w1 = $ev::EvaluateWindow($null, $null, $null, $null)
+            $w2 = $ev::EvaluateWindow($rules, $none, 'title', $s)
+            $w3 = $ev::EvaluateWindow($rules, $withNull, 'title', $s)
+            $u1 = $ev::EvaluateTab($null, 'x', $null)
+            $u2 = $ev::EvaluateTab($rules, $null, $null)
+            $u3 = $ev::EvaluateWindow($null, $null, $null)
+            $u4 = $ev::EvaluateWindow($rules, $none, 'title')
+            $u5 = $ev::EvaluateWindow($rules, $withNull, 'title')
+        }
+        catch {
+            $caught = $_
+        }
+        $caught | Should BeNullOrEmpty
+        $t1.Matched | Should Be $false
+        $t1.Name | Should BeExactly 'x'
+        ($null -eq $t2.Name) | Should Be $true
+        $t3.Name | Should BeExactly 'x'
+        ($null -eq $w1.IdentityName) | Should Be $true
+        $w2.IdentityName | Should BeExactly 'title'
+        ($null -eq $w2.Rank) | Should Be $true
+        ($null -eq $w2.Reference) | Should Be $true
+        foreach ($pair in @(@($t1, $u1), @($t2, $u2))) {
+            $pair[0].Matched | Should Be $pair[1].Matched
+            $pair[0].Name | Should Be $pair[1].Name
+            @($pair[0].Diagnostics).Count | Should Be @($pair[1].Diagnostics).Count
+        }
+        foreach ($pair in @(@($w1, $u3), @($w2, $u4), @($w3, $u5))) {
+            $pair[0].IdentityName | Should Be $pair[1].IdentityName
+            $pair[0].Rank | Should Be $pair[1].Rank
+            $pair[0].Reference | Should Be $pair[1].Reference
+            @($pair[0].Diagnostics).Count | Should Be @($pair[1].Diagnostics).Count
+        }
+        $s.TimeoutCount | Should Be 0
+        $s.SkippedCount | Should Be 0
+        $s.TrippedCount | Should Be 0
+    }
+}
+
+Describe 'SPEC-RULES-010 AC-007 unchanged behaviour and signatures (evaluator rows)' {
+    It 'RuleEvaluator carries EvaluateTab and EvaluateWindow with exactly 3 and 4 parameters, the 3-parameter types unchanged' {
+        $flags = [Reflection.BindingFlags]'Public,Static,DeclaredOnly'
+        $ev = [TerminalOrganizer.Core.Rules.RuleEvaluator]
+        foreach ($name in @('EvaluateTab', 'EvaluateWindow')) {
+            $ms = @($ev.GetMethods($flags) | Where-Object { $_.Name -eq $name })
+            (@($ms | ForEach-Object { $_.GetParameters().Count } | Sort-Object) -join ',') | Should BeExactly '3,4'
+        }
+        $tab3 = @($ev.GetMethods($flags) | Where-Object { $_.Name -eq 'EvaluateTab' -and $_.GetParameters().Count -eq 3 })[0]
+        $win3 = @($ev.GetMethods($flags) | Where-Object { $_.Name -eq 'EvaluateWindow' -and $_.GetParameters().Count -eq 3 })[0]
+        (@($tab3.GetParameters() | ForEach-Object { $_.ParameterType.Name }) -join ',') | Should BeExactly 'RuleSet,String,String'
+        (@($win3.GetParameters() | ForEach-Object { $_.ParameterType.Name }) -join ',') | Should BeExactly 'RuleSet,TabSnapshot[],String'
+        $tab4 = @($ev.GetMethods($flags) | Where-Object { $_.Name -eq 'EvaluateTab' -and $_.GetParameters().Count -eq 4 })[0]
+        $win4 = @($ev.GetMethods($flags) | Where-Object { $_.Name -eq 'EvaluateWindow' -and $_.GetParameters().Count -eq 4 })[0]
+        $tab4.GetParameters()[3].ParameterType.FullName | Should BeExactly 'TerminalOrganizer.Core.Rules.RuleEvaluationState'
+        $win4.GetParameters()[3].ParameterType.FullName | Should BeExactly 'TerminalOrganizer.Core.Rules.RuleEvaluationState'
+    }
+
+    It 'eight ordinary titles through the four-argument EvaluateTab with one state equal the three-argument results and count nothing' {
+        $u = Build-Rules (New-RuleListU) $true
+        $s = New-State10
+        $titles = @('powershell', 'PowerShell 7.4', 'ssh server1', '12-alpha', 'task #3', 'Windows PowerShell', 'unknown', 'OC_YODA1')
+        foreach ($title in $titles) {
+            $cmd = $null
+            if ($title -ceq 'OC_YODA1') { $cmd = $CMD_LOCAL }
+            $plain = Eval-Tab $u $title $cmd
+            $withState = [TerminalOrganizer.Core.Rules.RuleEvaluator]::EvaluateTab($u, $title, $cmd, $s)
+            $withState.Matched | Should Be $plain.Matched
+            $withState.Name | Should Be $plain.Name
+            $withState.Rank | Should Be $plain.Rank
+            $withState.Reference | Should Be $plain.Reference
+            @($withState.Diagnostics).Count | Should Be 0
+        }
+        $s.TimeoutCount | Should Be 0
+        $s.SkippedCount | Should Be 0
+        $s.TrippedCount | Should Be 0
+    }
+}
+
+Describe 'SPEC-RULES-010 AC-011 rule identity in the state and no shared mutable data' {
+    It 'identity is position plus subject plus pattern text; states and calls share nothing; a null subject is not a skipped evaluation' {
+        $ev = [TerminalOrganizer.Core.Rules.RuleEvaluator]
+        $a = Build-Rules ([object[]]@(@{ match = 'regex:^(a+)+$' }))
+        $b = Build-Rules ([object[]]@(@{ match = 'regex:^(a+)+c$' }))
+        $c = Build-Rules ([object[]]@(@{ match = 'regex:^(a+)+$'; on = 'commandline' }))
+        $s1 = New-State10
+        $s2 = New-State10
+
+        [void]$ev::EvaluateWindow($a, (New-Tabs10 @($H10, $H10)), 'w', $s1)
+        $s1.TimeoutCount | Should Be 2
+        $s1.SkippedCount | Should Be 0
+        $s1.TrippedCount | Should Be 1
+        $s1.IsTripped($a.Rules[0]) | Should Be $true
+
+        $ob = $ev::EvaluateWindow($b, (New-Tabs10 @($H10)), 'w', $s1)
+        @($ob.Diagnostics).Count | Should Be 1
+        $ob.Diagnostics[0].Reason | Should BeExactly $EXEC10
+        $s1.IsTripped($b.Rules[0]) | Should Be $false
+        $s1.TimeoutCount | Should Be 3
+        $s1.SkippedCount | Should Be 0
+        $s1.TrippedCount | Should Be 1
+
+        $c1 = $ev::EvaluateTab($c, 'x', $H10, $s1)
+        @($c1.Diagnostics).Count | Should Be 1
+        $c1.Diagnostics[0].Reason | Should BeExactly $EXEC10
+        $s1.TimeoutCount | Should Be 4
+        $s1.SkippedCount | Should Be 0
+        $s1.TrippedCount | Should Be 1
+
+        $c2 = $ev::EvaluateTab($c, 'x', $H10, $s1)
+        @($c2.Diagnostics).Count | Should Be 1
+        $c2.Diagnostics[0].Reason | Should BeExactly $EXEC10
+        $s1.IsTripped($c.Rules[0]) | Should Be $true
+        $s1.TimeoutCount | Should Be 5
+        $s1.SkippedCount | Should Be 0
+        $s1.TrippedCount | Should Be 2
+
+        # [NullString]::Value, because PowerShell passes a bare $null to a string parameter as an empty string.
+        $cNull = $ev::EvaluateTab($c, 'x', [NullString]::Value, $s1)
+        @($cNull.Diagnostics).Count | Should Be 0
+        $cNull.Matched | Should Be $false
+        $cNull.Name | Should BeExactly 'x'
+        $s1.TimeoutCount | Should Be 5
+        $s1.SkippedCount | Should Be 0
+        $s1.TrippedCount | Should Be 2
+
+        $c3 = $ev::EvaluateTab($c, 'x', $H10, $s1)
+        @($c3.Diagnostics).Count | Should Be 1
+        $c3.Diagnostics[0].Reason | Should BeExactly $SKIP10
+        $s1.TimeoutCount | Should Be 5
+        $s1.SkippedCount | Should Be 1
+        $s1.TrippedCount | Should Be 2
+
+        $o2 = $ev::EvaluateWindow($a, (New-Tabs10 @($H10)), 'w', $s2)
+        $o2.Diagnostics[0].Reason | Should BeExactly $EXEC10
+        $s2.TimeoutCount | Should Be 1
+        $s2.SkippedCount | Should Be 0
+        $s2.TrippedCount | Should Be 0
+        $s2.IsTripped($a.Rules[0]) | Should Be $false
+
+        $o3 = $ev::EvaluateWindow($a, (New-Tabs10 @($H10)), 'w')
+        @($o3.Diagnostics).Count | Should Be 1
+        $o3.Diagnostics[0].Reason | Should BeExactly $EXEC10
+
+        $s1.IsTripped($null) | Should Be $false
+    }
+
+    It 'no mutable static field exists on RuleEvaluator or RuleEvaluationState' {
+        $flags = [Reflection.BindingFlags]'Public,NonPublic,Static,DeclaredOnly'
+        $bad = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($type in @([TerminalOrganizer.Core.Rules.RuleEvaluator], [TerminalOrganizer.Core.Rules.RuleEvaluationState])) {
+            foreach ($f in $type.GetFields($flags)) {
+                if ($f.Name.StartsWith('<')) { continue }
+                if ($f.GetCustomAttributes([Runtime.CompilerServices.CompilerGeneratedAttribute], $false).Count -gt 0) { continue }
+                $ok = $f.IsLiteral -or ($f.IsInitOnly -and ($f.FieldType -eq [string] -or $f.FieldType.IsPrimitive -or $f.FieldType.IsEnum))
+                if (-not $ok) { $bad.Add($type.Name + '.' + $f.Name) }
+            }
+        }
+        @($bad).Count | Should Be 0
+    }
+}
+
+# --- SPEC-RULES-010 M2: compose wiring (one state per compose, the caller-state seam) ---
+
+function New-Acqs10([string[]]$Titles) {
+    $list = New-Object 'System.Collections.Generic.List[TerminalOrganizer.Core.Windows.AcquiredWindow]'
+    for ($i = 0; $i -lt $Titles.Count; $i++) {
+        $list.Add((New-Acq (500 + $i) (New-TabOk ([string[]]@($Titles[$i])))))
+    }
+    , $list.ToArray()
+}
+
+# Composes N single-tab windows (distinct handles) through the three-argument Compose.
+function Compose-Many10([string[]]$Titles, $RuleSet, $Sessions = @()) {
+    [TerminalOrganizer.Core.Windows.WindowSnapshotBuilder]::Compose((New-Acqs10 $Titles), ([TerminalOrganizer.Core.Windows.SessionRecord[]]@($Sessions)), $RuleSet)
+}
+
+# Composes N single-tab windows through the four-argument Compose with a caller-supplied state.
+function Compose-State10([string[]]$Titles, $RuleSet, $State) {
+    [TerminalOrganizer.Core.Windows.WindowSnapshotBuilder]::Compose((New-Acqs10 $Titles), ([TerminalOrganizer.Core.Windows.SessionRecord[]]@()), $RuleSet, $State)
+}
+
+Describe 'SPEC-RULES-010 AC-001 the probe shape: 8 windows x 3 hostile rules' {
+    It 'one compose gives 24 diagnostics of which 6 are executed timeouts and 18 are skipped' {
+        $rs = Build-Rules ([object[]]@(@{ match = 'regex:^(a+)+$' }, @{ match = 'regex:^(a+)+c$' }, @{ match = 'regex:^([a-z]+)+d$' }))
+        $snaps = @(Compose-Many10 (@($H10) * 8) $rs)
+        $snaps.Count | Should Be 8
+        $all = @($snaps | ForEach-Object { $_.RuleDiagnostics })
+        $all.Count | Should Be 24
+        (Count-Reason10 $all $EXEC10) | Should Be 6
+        (Count-Reason10 $all $SKIP10) | Should Be 18
+        foreach ($pos in 1..3) {
+            $atPos = @($all | Where-Object { $_.Position -eq $pos })
+            $atPos.Count | Should Be 8
+            (Count-Reason10 $atPos $EXEC10) | Should Be 2
+            (Count-Reason10 $atPos $SKIP10) | Should Be 6
+            for ($w = 0; $w -lt 8; $w++) {
+                $d = @($snaps[$w].RuleDiagnostics | Where-Object { $_.Position -eq $pos })
+                $d.Count | Should Be 1
+                $expected = $SKIP10
+                if ($w -lt 2) { $expected = $EXEC10 }
+                $d[0].Reason | Should BeExactly $expected
+            }
+        }
+        foreach ($snap in $snaps) {
+            (@($snap.RuleDiagnostics | ForEach-Object { $_.Position }) -join ',') | Should BeExactly '1,2,3'
+            $snap.IdentityName | Should BeExactly $H10
+            ($null -eq $snap.RuleRank) | Should Be $true
+            ($null -eq $snap.RuleReference) | Should Be $true
+        }
+    }
+}
+
+Describe 'SPEC-RULES-010 AC-002 the trip happens on the second timeout' {
+    It 'windows A3, H, A3, H, A3, H with a ranked hostile rule: two executed, two skipped, counters 2, 2, 1' {
+        $rs = Build-Rules ([object[]]@(@{ match = 'regex:^(a+)+$'; rank = 7 }))
+        $s = New-State10
+        $snaps = @(Compose-State10 @('aaa', $H10, 'aaa', $H10, 'aaa', $H10) $rs $s)
+        $snaps.Count | Should Be 6
+        foreach ($i in 0, 2) {
+            $snaps[$i].RuleRank | Should Be 7
+            $snaps[$i].RuleReference | Should BeExactly 'rule 1: regex:^(a+)+$'
+            @($snaps[$i].RuleDiagnostics).Count | Should Be 0
+        }
+        foreach ($i in 1, 3) {
+            @($snaps[$i].RuleDiagnostics).Count | Should Be 1
+            $snaps[$i].RuleDiagnostics[0].Reason | Should BeExactly $EXEC10
+        }
+        ($null -eq $snaps[4].RuleRank) | Should Be $true
+        ($null -eq $snaps[4].RuleReference) | Should Be $true
+        @($snaps[4].RuleDiagnostics).Count | Should Be 1
+        $snaps[4].RuleDiagnostics[0].Reason | Should BeExactly $SKIP10
+        @($snaps[5].RuleDiagnostics).Count | Should Be 1
+        $snaps[5].RuleDiagnostics[0].Reason | Should BeExactly $SKIP10
+        $s.TimeoutCount | Should Be 2
+        $s.SkippedCount | Should Be 2
+        $s.TrippedCount | Should Be 1
+        $s.IsTripped($rs.Rules[0]) | Should Be $true
+        $all = @($snaps | ForEach-Object { $_.RuleDiagnostics })
+        $all.Count | Should Be 4
+    }
+}
+
+Describe 'SPEC-RULES-010 AC-003 one hostile rule among good ones' {
+    It 'the good glob keeps its rank on every P window, and the diagnostic count rises to 7' {
+        $rs = Build-Rules ([object[]]@(@{ match = 'regex:^(a+)+$' }, @{ match = 'PowerShell*'; rank = 200 }))
+        $p = 'PowerShell 7'
+        $snaps = @(Compose-Many10 @($H10, $p, $H10, $p, $H10, $p, $H10, $p) $rs)
+        $snaps.Count | Should Be 8
+        foreach ($i in 1, 3, 5, 7) {
+            $snaps[$i].RuleRank | Should Be 200
+            $snaps[$i].RuleReference | Should BeExactly 'rule 2: PowerShell*'
+        }
+        foreach ($i in 0, 2, 4, 6) {
+            ($null -eq $snaps[$i].RuleRank) | Should Be $true
+            ($null -eq $snaps[$i].RuleReference) | Should Be $true
+        }
+        $all = @($snaps | ForEach-Object { $_.RuleDiagnostics })
+        $all.Count | Should Be 7
+        (Count-Reason10 $all $EXEC10) | Should Be 2
+        (Count-Reason10 $all $SKIP10) | Should Be 5
+        @($all | Where-Object { $_.Position -ne 1 }).Count | Should Be 0
+        @($snaps[0].RuleDiagnostics)[0].Reason | Should BeExactly $EXEC10
+        @($snaps[1].RuleDiagnostics).Count | Should Be 0
+        @($snaps[2].RuleDiagnostics)[0].Reason | Should BeExactly $EXEC10
+        foreach ($i in 3..7) {
+            @($snaps[$i].RuleDiagnostics).Count | Should Be 1
+            $snaps[$i].RuleDiagnostics[0].Reason | Should BeExactly $SKIP10
+        }
+    }
+}
+
+Describe 'SPEC-RULES-010 AC-005 compose isolation and the caller-state seam' {
+    It 'two composes with one rule set each give 2 executed and 1 skipped: nothing carries over' {
+        $rs = Build-Rules ([object[]]@(@{ match = 'regex:^(a+)+$' }))
+        foreach ($run in 1, 2) {
+            $snaps = @(Compose-Many10 @($H10, $H10, $H10) $rs)
+            $all = @($snaps | ForEach-Object { $_.RuleDiagnostics })
+            $all.Count | Should Be 3
+            (Count-Reason10 $all $EXEC10) | Should Be 2
+            (Count-Reason10 $all $SKIP10) | Should Be 1
+        }
+    }
+
+    It 'a caller-supplied state is used for the whole call and is neither reset nor discarded' {
+        $rs = Build-Rules ([object[]]@(@{ match = 'regex:^(a+)+$' }))
+        $s = New-State10
+        $first = @(Compose-State10 @($H10, $H10) $rs $s)
+        $d1 = @($first | ForEach-Object { $_.RuleDiagnostics })
+        $d1.Count | Should Be 2
+        (Count-Reason10 $d1 $EXEC10) | Should Be 2
+        $s.TimeoutCount | Should Be 2
+        $s.SkippedCount | Should Be 0
+        $s.TrippedCount | Should Be 1
+        $second = @(Compose-State10 @($H10, $H10) $rs $s)
+        $d2 = @($second | ForEach-Object { $_.RuleDiagnostics })
+        $d2.Count | Should Be 2
+        (Count-Reason10 $d2 $SKIP10) | Should Be 2
+        $s.TimeoutCount | Should Be 2
+        $s.SkippedCount | Should Be 2
+        $s.TrippedCount | Should Be 1
+    }
+
+    It 'a null supplied state behaves as the three-argument form' {
+        $rs = Build-Rules ([object[]]@(@{ match = 'regex:^(a+)+$' }))
+        $snaps = @(Compose-State10 @($H10, $H10, $H10) $rs $null)
+        $all = @($snaps | ForEach-Object { $_.RuleDiagnostics })
+        $all.Count | Should Be 3
+        (Count-Reason10 $all $EXEC10) | Should Be 2
+        (Count-Reason10 $all $SKIP10) | Should Be 1
+    }
+}
+
+Describe 'SPEC-RULES-010 AC-006 null and empty inputs (composer)' {
+    It 'the four-argument Compose never throws and equals the three-argument Compose; the state stays at 0, 0, 0' {
+        $wsb = [TerminalOrganizer.Core.Windows.WindowSnapshotBuilder]
+        $rules = Build-Rules (New-RuleListU)
+        $empty = Build-Rules $null
+        $s = New-State10
+        $acq = New-Acqs10 @('powershell', 'ssh server1', '2-build')
+        $sessions = [TerminalOrganizer.Core.Windows.SessionRecord[]]@()
+        $caught = $null
+        try {
+            $n4 = $wsb::Compose($null, $null, $null, $null)
+            $a4 = $wsb::Compose($acq, $null, $null, $s)
+            $e4 = $wsb::Compose($acq, $sessions, $empty, $s)
+            $r4 = $wsb::Compose($acq, $sessions, $rules, $null)
+            $n3 = $wsb::Compose($null, $null, $null)
+            $a3 = $wsb::Compose($acq, $null, $null)
+            $e3 = $wsb::Compose($acq, $sessions, $empty)
+            $r3 = $wsb::Compose($acq, $sessions, $rules)
+        }
+        catch {
+            $caught = $_
+        }
+        $caught | Should BeNullOrEmpty
+        @($n4).Count | Should Be 0
+        @($n3).Count | Should Be 0
+        foreach ($pair in @(@($a4, $a3), @($e4, $e3), @($r4, $r3))) {
+            @($pair[0]).Count | Should Be 3
+            @($pair[1]).Count | Should Be 3
+            for ($i = 0; $i -lt 3; $i++) {
+                $x = @($pair[0])[$i]
+                $y = @($pair[1])[$i]
+                $x.IdentityName | Should Be $y.IdentityName
+                $x.RuleRank | Should Be $y.RuleRank
+                $x.RuleReference | Should Be $y.RuleReference
+                @($x.RuleDiagnostics).Count | Should Be @($y.RuleDiagnostics).Count
+            }
+        }
+        $s.TimeoutCount | Should Be 0
+        $s.SkippedCount | Should Be 0
+        $s.TrippedCount | Should Be 0
+    }
+}
+
+Describe 'SPEC-RULES-010 AC-007 unchanged behaviour and signatures (composer rows)' {
+    It 'WindowSnapshotBuilder carries Compose with exactly 2, 3 and 4 parameters, the 2- and 3-parameter types unchanged' {
+        $flags = [Reflection.BindingFlags]'Public,Static,DeclaredOnly'
+        $ms = @([TerminalOrganizer.Core.Windows.WindowSnapshotBuilder].GetMethods($flags) | Where-Object { $_.Name -eq 'Compose' })
+        (@($ms | ForEach-Object { $_.GetParameters().Count } | Sort-Object) -join ',') | Should BeExactly '2,3,4'
+        $two = @($ms | Where-Object { $_.GetParameters().Count -eq 2 })[0]
+        $three = @($ms | Where-Object { $_.GetParameters().Count -eq 3 })[0]
+        $four = @($ms | Where-Object { $_.GetParameters().Count -eq 4 })[0]
+        (@($two.GetParameters() | ForEach-Object { $_.ParameterType.Name }) -join ',') | Should BeExactly 'AcquiredWindow[],SessionRecord[]'
+        (@($three.GetParameters() | ForEach-Object { $_.ParameterType.Name }) -join ',') | Should BeExactly 'AcquiredWindow[],SessionRecord[],RuleSet'
+        $four.GetParameters()[3].ParameterType.FullName | Should BeExactly 'TerminalOrganizer.Core.Rules.RuleEvaluationState'
+    }
+
+    It 'eight ordinary titles composed as eight windows through the four-argument Compose equal the evaluator results and count nothing' {
+        $u = Build-Rules (New-RuleListU) $true
+        $session = New-Session 'YODA1' 'Local' $CMD_LOCAL
+        $s = New-State10
+        $titles = [string[]]@('powershell', 'PowerShell 7.4', 'ssh server1', '12-alpha', 'task #3', 'Windows PowerShell', 'unknown', 'OC_YODA1')
+        $snaps = @([TerminalOrganizer.Core.Windows.WindowSnapshotBuilder]::Compose((New-Acqs10 $titles),
+            ([TerminalOrganizer.Core.Windows.SessionRecord[]]@($session)), $u, $s))
+        $snaps.Count | Should Be 8
+        for ($i = 0; $i -lt 8; $i++) {
+            $tab = $snaps[$i].Tabs[0]
+            $cmd = [NullString]::Value
+            if ($null -ne $tab.Session) { $cmd = $tab.Session.CommandLine }
+            $expected = Eval-Tab $u $tab.Title $cmd
+            $snaps[$i].IdentityName | Should Be $expected.Name
+            $snaps[$i].RuleRank | Should Be $expected.Rank
+            $snaps[$i].RuleReference | Should Be $expected.Reference
+        }
+        $s.TimeoutCount | Should Be 0
+        $s.SkippedCount | Should Be 0
+        $s.TrippedCount | Should Be 0
+    }
+}

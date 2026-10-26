@@ -3,17 +3,26 @@
 #             desktop precedence) against the pinned values; prints one PASS/FAIL line per
 #             check and exits 0 only when every check passes.
 # No switch  : enumerates the real monitors and prints, per monitor: parsed identity, serial,
-#             work area, DPI, the resolved desktop GUID source, and (with -AppliedLayouts
-#             <path>) the fuzzy-match result. Live output is informational (morning
-#             checklist), NOT an acceptance claim about live correctness.
+#             work area, DPI, the resolved desktop GUID source, and the FancyZones live-row
+#             hint read from the log folder (a `live-hint:` line, printed always;
+#             -FancyZonesLogs <path>, default: the real FancyZones Logs folder). With
+#             -AppliedLayouts <path> it also prints the `document-order:` result, the
+#             `hinted:` result and the `decided by:` rule (SPEC-MON-011); these lines
+#             replace the older `fuzzy-match:` line.
+#             Live output is informational (morning checklist), NOT an acceptance claim
+#             about live correctness.
 param(
     [switch]$SelfTest,
-    [string]$AppliedLayouts
+    [string]$AppliedLayouts,
+    [string]$FancyZonesLogs
 )
 
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $here
 $dllPath = Join-Path $repoRoot 'bin\TerminalOrganizer.Core.dll'
+if (-not $FancyZonesLogs) {
+    $FancyZonesLogs = Join-Path $env:LOCALAPPDATA 'Microsoft\PowerToys\FancyZones\Logs'
+}
 
 if (-not (Test-Path $dllPath)) {
     Write-Output ('FAIL: build output missing: ' + $dllPath + ' (run build.ps1 first)')
@@ -61,6 +70,28 @@ function New-SyntheticEdid([byte[]]$TextBytes) {
     $edid[57] = 0x00
     for ($i = 0; $i -lt $TextBytes.Length; $i++) { $edid[58 + $i] = $TextBytes[$i] }
     ,$edid
+}
+
+# SPEC-MON-011 REQ-TOOL-001: the per-monitor hint lines. Shared by the live mode and by -SelfTest, which
+# asserts them on inputs pinned inside this tool.
+function Format-RowText($Entry) {
+    if ($null -eq $Entry) { return 'no-match' }
+    'position ' + $Entry.Position + ' (' + $Entry.Device.MonitorNumber + ', ' + $Entry.Device.SerialNumber + ')'
+}
+
+function Get-HintLines($ReadResult, $AppliedDoc, $Identity, $DesktopText) {
+    $lines = New-Object 'System.Collections.Generic.List[string]'
+    $hint = $ReadResult.Hint
+    if ($null -ne $hint) { $lines.Add('  live-hint: ' + $hint.Number + ' ' + $hint.Serial + ' (' + $hint.SourceFileName + ')') }
+    else { $lines.Add('  live-hint: none (' + $ReadResult.Code.ToString() + ')') }
+    if ($null -ne $AppliedDoc) {
+        $plain = [TerminalOrganizer.Core.Monitors.AppliedEntrySelector]::Select($AppliedDoc, $Identity, $DesktopText)
+        $decision = [TerminalOrganizer.Core.Monitors.AppliedEntrySelector]::Decide($AppliedDoc, $Identity, $DesktopText, $hint)
+        $lines.Add('  document-order: ' + (Format-RowText $plain))
+        $lines.Add('  hinted: ' + (Format-RowText $decision.Entry))
+        $lines.Add('  decided by: ' + $decision.Rule.ToString())
+    }
+    ,$lines.ToArray()
 }
 
 if ($SelfTest) {
@@ -175,6 +206,55 @@ if ($SelfTest) {
     $resolvedLower = [TerminalOrganizer.Core.Monitors.DesktopIdResolver]::Resolve($DESKTOP_1.ToLowerInvariant(), $null, $null)
     Assert-Check 'precedence/guid-by-value' ($resolvedLower -eq [guid]$DESKTOP_1) 'value-equal GUID for lower-case text'
 
+    # --- SPEC-MON-011 rows: log parser, hinted selection, line formats (inputs pinned here, never derived from the code under test) ---
+    $slId = 'DEL4091'
+    $slInst4352 = '5&22cafbe4&0&UID4352'
+    $slInst4358 = '5&22cafbe4&0&UID4358'
+    $slD1 = '{9089F388-5216-49EA-9CD4-07E910D817EB}'
+    $slD2 = '{44CD2EF4-27B1-40A7-8549-DD8033C09F8F}'
+    $slD3 = '{F00CF935-4664-4091-8DB7-96651F0C4D1E}'
+    $slEhu = 'XPG0H42JBEHU'
+    $slD2u = 'XPG0H42JBD2U'
+    $slLog = '[2026-10-23 18:52:16.538900] [p-24844] [t-24848] [info] Initialize layout on DEL4091_5&22cafbe4&0&UID4358_2_XPG0H42JBEHU_{44CD2EF4-27B1-40A7-8549-DD8033C09F8F}, work area rect = 1920x1032' + "`r`n" +
+        '[2026-10-23 18:52:16.552001] [p-24844] [t-24848] [info] Initialize layout on DEL4091_5&22cafbe4&0&UID4352_1_XPG0H42JBEHU_{44CD2EF4-27B1-40A7-8549-DD8033C09F8F}, work area rect = 1920x1032' + "`r`n"
+    $h4352 = [TerminalOrganizer.Core.Monitors.FancyZonesLogParser]::FindNewestHint($slLog, $slId, $slInst4352)
+    Assert-Check 'mon011/parser-UID4352' ($null -ne $h4352 -and $h4352.Number -eq 1 -and $h4352.Serial -ceq $slEhu) '(1, XPG0H42JBEHU) from the log, not the EDID serial'
+    $h4358 = [TerminalOrganizer.Core.Monitors.FancyZonesLogParser]::FindNewestHint($slLog, $slId, $slInst4358)
+    Assert-Check 'mon011/parser-UID4358' ($null -ne $h4358 -and $h4358.Number -eq 2 -and $h4358.Serial -ceq $slEhu) '(2, XPG0H42JBEHU)'
+
+    # SF-STALE: 12 rows (instance, number, serial, desktop) in the original order; positions 0, 5, 6, 7, 8, 9 are stale.
+    $slRows = @(
+        @($slInst4352, 2, $slD2u, $slD1), @($slInst4358, 2, $slEhu, $slD1), @($slInst4352, 1, $slEhu, $slD1),
+        @($slInst4358, 2, $slEhu, $slD2), @($slInst4352, 1, $slEhu, $slD2), @($slInst4358, 1, $slD2u, $slD1),
+        @($slInst4358, 1, $slD2u, $slD2), @($slInst4358, 1, $slD2u, $slD3), @($slInst4352, 2, $slD2u, $slD2),
+        @($slInst4352, 2, $slD2u, $slD3), @($slInst4352, 1, $slEhu, $slD3), @($slInst4358, 2, $slEhu, $slD3)
+    )
+    $slJson = '{"applied-layouts":[' + ((@($slRows | ForEach-Object {
+        '{"device":{"monitor":"' + $slId + '","monitor-instance":"' + $_[0] + '","monitor-number":' + $_[1] + ',"serial-number":"' + $_[2] +
+            '","virtual-desktop":"' + $_[3] + '"},"applied-layout":{"uuid":"{00000000-0000-0000-0000-000000000001}","type":"custom","show-spacing":true,"spacing":0,"zone-count":2}}'
+    })) -join ',') + ']}'
+    $slDoc = [TerminalOrganizer.Core.Layouts.FancyZonesJsonReader]::ParseAppliedLayouts($slJson)
+    # Expected-position table (acceptance.md): label, instance, desktop, hint number, 3-argument pick, hinted pick.
+    $slCases = @(
+        @('UID4352-D1', $slInst4352, $slD1, 1, 0, 2), @('UID4352-D2', $slInst4352, $slD2, 1, 4, 4), @('UID4352-D3', $slInst4352, $slD3, 1, 9, 10),
+        @('UID4358-D1', $slInst4358, $slD1, 2, 1, 1), @('UID4358-D2', $slInst4358, $slD2, 2, 3, 3), @('UID4358-D3', $slInst4358, $slD3, 2, 7, 11)
+    )
+    foreach ($c in $slCases) {
+        $slIdentity = $(if ($c[1] -eq $slInst4352) { New-MonitorIdentity $slId $c[1] 1 $slD2u } else { New-MonitorIdentity $slId $c[1] 2 $slEhu })
+        $slHint = New-Object TerminalOrganizer.Core.Monitors.LiveRowHint -ArgumentList $c[3], $slEhu
+        $slDecision = [TerminalOrganizer.Core.Monitors.AppliedEntrySelector]::Decide($slDoc, $slIdentity, $c[2], $slHint)
+        $slPlain = [TerminalOrganizer.Core.Monitors.AppliedEntrySelector]::Select($slDoc, $slIdentity, $c[2])
+        Assert-Check ('mon011/hinted-' + $c[0]) ($null -ne $slDecision.Entry -and $slDecision.Entry.Position -eq $c[5] -and $slDecision.Rule.ToString() -ceq 'LiveHint' -and $null -ne $slPlain -and $slPlain.Position -eq $c[4]) ('LiveHint at position ' + $c[5] + ', document order ' + $c[4])
+    }
+
+    # Line formats for the SF-STALE decision of ID-4352 on D1 with the hint (1, XPG0H42JBEHU) from log_2026-10-23.log.
+    $slReadResult = New-Object TerminalOrganizer.Core.Monitors.LogReadResult -ArgumentList ([TerminalOrganizer.Core.Monitors.LogReadCode]::Found),
+        (New-Object TerminalOrganizer.Core.Monitors.LiveRowHint -ArgumentList 1, $slEhu, 'log_2026-10-23.log')
+    $slLines = Get-HintLines $slReadResult $slDoc (New-MonitorIdentity $slId $slInst4352 1 $slD2u) $slD1
+    $slExpected = @('  live-hint: 1 XPG0H42JBEHU (log_2026-10-23.log)', '  document-order: position 0 (2, XPG0H42JBD2U)', '  hinted: position 2 (1, XPG0H42JBEHU)', '  decided by: LiveHint')
+    Assert-Check 'mon011/line-format' (($slLines -join '|') -ceq ($slExpected -join '|')) ($slExpected -join ' | ')
+    foreach ($slLine in $slLines) { Write-Output $slLine }
+
     Write-Output ('SelfTest summary: ' + $script:CheckCount + ' checks, ' + $script:FailCount + ' failed')
     if ($script:FailCount -gt 0) { exit 1 }
     exit 0
@@ -232,14 +312,10 @@ try {
         Write-Output ('  monitor-rect=' + $m.MonitorLeft + ',' + $m.MonitorTop + ' ' + $m.MonitorWidth + 'x' + $m.MonitorHeight +
             ' work-area=' + $m.WorkArea.Left + ',' + $m.WorkArea.Top + ' ' + $m.WorkArea.Width + 'x' + $m.WorkArea.Height + ' dpi=' + $m.WorkArea.Dpi)
         Write-Output ('  interface-path=' + $m.InterfacePath)
-        if ($null -ne $appliedDoc) {
-            $selected = [TerminalOrganizer.Core.Monitors.AppliedEntrySelector]::Select($appliedDoc, $m.ToIdentity(), $desktopText)
-            if ($null -eq $selected) {
-                Write-Output '  fuzzy-match: no-match'
-            }
-            else {
-                Write-Output ('  fuzzy-match: entry ' + $selected.Position + ' type=' + $selected.Type + ' uuid=' + $selected.Uuid)
-            }
+        # SPEC-MON-011 REQ-TOOL-001: the log hint, then (with -AppliedLayouts) document order, hinted pick and the rule.
+        $readResult = [TerminalOrganizer.Core.Monitors.FancyZonesLogReader]::Read($FancyZonesLogs, $m.MonitorId, $m.Instance)
+        foreach ($hintLine in (Get-HintLines $readResult $appliedDoc $m.ToIdentity() $desktopText)) {
+            Write-Output $hintLine
         }
     }
     if ($monitors.Length -eq 0) {

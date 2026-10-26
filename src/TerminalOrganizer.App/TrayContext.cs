@@ -260,29 +260,11 @@ namespace TerminalOrganizer.App
                 return resolved.HasValue ? resolved.Value.ToString("B") : null;
             };
 
-            LayoutResolution layoutResolve = delegate(MonitorInfo monitor, string desktop)
-            {
-                string appliedPath = Path.Combine(fancyZonesDir, "applied-layouts.json");
-                string customPath = Path.Combine(fancyZonesDir, "custom-layouts.json");
-                if (!File.Exists(appliedPath))
-                {
-                    return LayoutResult.Unsupported(LayoutReason.NoAppliedLayout, null, null, null);
-                }
-                string appliedJson = File.ReadAllText(appliedPath);
-                string customJson = File.Exists(customPath) ? File.ReadAllText(customPath) : string.Empty;
-                AppliedLayoutsDocument document = FancyZonesJsonReader.ParseAppliedLayouts(appliedJson);
-                if (!document.IsValid)
-                {
-                    return LayoutResult.Invalid(LayoutReason.MalformedJson, document.Detail, null);
-                }
-                AppliedLayoutEntry entry = AppliedEntrySelector.Select(document, monitor.ToIdentity(), desktop);
-                if (entry == null)
-                {
-                    return LayoutResult.Unsupported(LayoutReason.NoAppliedLayout, null, null, null);
-                }
-                OrganizerDeviceContext context = OrganizerContext.Build(entry, monitor);
-                return LayoutResolver.ResolveByDeviceKey(appliedJson, customJson, context.Key, context.WorkArea);
-            };
+            // SPEC-MON-011: the resolution (applied row choice with the FancyZones log hint, layout lookup, decision
+            // log line) lives in AppliedLayoutResolver; the log delegate is the app log.
+            AppliedLayoutResolver layoutResolver = new AppliedLayoutResolver(fancyZonesDir,
+                delegate(string message) { log.Append(message); });
+            LayoutResolution layoutResolve = layoutResolver.Resolve;
 
             // Pre-declared so the discovery closure can capture it (assigned immediately
             // below; the closure cannot run before Build completes).
@@ -428,15 +410,19 @@ namespace TerminalOrganizer.App
         }
 
         /// <summary>The menu and the manager actions use the same fail-closed policy across all monitors (B2: facts + snapshots joined by handle). The menu path never carries a run token (B4).</summary>
-        internal static DiscoveredWindows ReadWindowsForMenu(LabelRegistry labels)
+        // @MX:NOTE: the sink receives rule timeouts only; the discovery trace stays null so the non-deduplicated UIA-probe and process-query lines never reach the log from the menu path (SPEC-RULES-010).
+        internal static DiscoveredWindows ReadWindowsForMenu(LabelRegistry labels, Action<string> ruleLog)
         {
             // REQ-SET-004: every menu read rebuilds the rule set from its own settings read.
             AppSettings read = LoadSettings(null);
-            return Discover(null, null, new Win32MonitorProvider(), new VirtualDesktopReader(),
+            DiscoveredWindows discovered = Discover(null, null, new Win32MonitorProvider(), new VirtualDesktopReader(),
                 new UiaProbeClient(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,
                     "TerminalOrganizer.UiaProbe.exe")),
                 new Win32WindowEnumerator(), new ProcessSessionQuery(),
                 new WindowStateReader(), labels, read.TitleRules.RuleSet, System.Threading.CancellationToken.None, null);
+            // REQ-LOG-002: one line per rule position per process, through the shared deduplicating log.
+            ReportRuleTimeouts(discovered.Snapshots, ruleLog);
+            return discovered;
         }
 
         /// <summary>One settings read for one discovery; the store is tolerant and never throws for file content.</summary>
@@ -512,6 +498,7 @@ namespace TerminalOrganizer.App
         }
 
         /// <summary>Writes one line per rule that timed out while evaluating a window, once per distinct rule and position (REQ-LOG-001).</summary>
+        // @MX:NOTE: the line text and the position-only dedupe key are pinned by tests (audit finding F9); changing the key needs its own SPEC. Executed and skipped diagnostics of one position share one line.
         private static void ReportRuleTimeouts(WindowSnapshot[] snapshots, Action<string> trace)
         {
             if (trace == null || snapshots == null)
@@ -772,7 +759,8 @@ namespace TerminalOrganizer.App
         private ContextMenuStrip BuildMenu()
         {
             AppSettings current = settings.Load();
-            DiscoveredWindows discovered = Composition.ReadWindowsForMenu(ports.Controller.Labels);
+            DiscoveredWindows discovered = Composition.ReadWindowsForMenu(ports.Controller.Labels,
+                delegate(string line) { log.Append(line); });
             ManagerSelector selector = current.ManagerSelector == null ? ManagerSelector.None() : current.ManagerSelector;
             ManagerResolution resolution = ManagerResolver.Resolve(selector, discovered.Facts, discovered.Snapshots);
             // REQ-UI-001: one row text per window (rank and provenance from this read's overrides and default rank).
@@ -1138,7 +1126,8 @@ namespace TerminalOrganizer.App
                     log.Append("set manager skipped: menu identity missing");
                     return;
                 }
-                WindowSnapshot[] fresh = Composition.ReadWindowsForMenu(ports.Controller.Labels).Snapshots;
+                WindowSnapshot[] fresh = Composition.ReadWindowsForMenu(ports.Controller.Labels,
+                    delegate(string line) { log.Append(line); }).Snapshots;
                 WindowSnapshot match = null;
                 bool multiple = false;
                 foreach (WindowSnapshot snapshot in fresh)
@@ -1186,7 +1175,8 @@ namespace TerminalOrganizer.App
                 {
                     return;
                 }
-                DiscoveredWindows discovered = Composition.ReadWindowsForMenu(ports.Controller.Labels);
+                DiscoveredWindows discovered = Composition.ReadWindowsForMenu(ports.Controller.Labels,
+                    delegate(string line) { log.Append(line); });
                 ManagerResolution resolution = ManagerResolver.Resolve(selector, discovered.Facts, discovered.Snapshots);
                 if (resolution.Status != ManagerResolutionStatus.Resolved)
                 {

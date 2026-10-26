@@ -3653,3 +3653,529 @@ Describe 'SPEC-RULES-009 AC-013 README' {
         @($limits -split "`n" | Where-Object { $_ -match '^- ' -and $_ -match '(?i)identity follows the window title' }).Count | Should Be 1
     }
 }
+
+# ---------------------------------------------------------------------------
+# SPEC-MON-011 M4: AppliedLayoutResolver (REQ-RES-001, REQ-RES-002; AC-011..AC-013)
+# and M5 tool wiring (REQ-TOOL-002; AC-014, the organize tools).
+# SF-STALE is pinned by hand from acceptance.md Conventions; expected row
+# identities, zone counts and line counts are never taken from the code under test.
+# Every resolver test builds its own FancyZones-shaped temp directory and removes it.
+# ---------------------------------------------------------------------------
+$RS_ID = 'DEL4091'
+$RS_INST_4352 = '5&22cafbe4&0&UID4352'
+$RS_INST_4358 = '5&22cafbe4&0&UID4358'
+$RS_INST_NONE = '5&22cafbe4&0&UID9999'
+$RS_DESK1 = '{9089F388-5216-49EA-9CD4-07E910D817EB}'
+$RS_DESK2 = '{44CD2EF4-27B1-40A7-8549-DD8033C09F8F}'
+$RS_DESK3 = '{F00CF935-4664-4091-8DB7-96651F0C4D1E}'
+$RS_EHU = 'XPG0H42JBEHU'
+$RS_D2U = 'XPG0H42JBD2U'
+$RS_FOUR = '{A1000000-0000-4000-8000-000000000004}'
+$RS_FIVE = '{A1000000-0000-4000-8000-000000000005}'
+$RS_TS = '[2026-10-23 18:52:16.538900] [p-24844] [t-24848] [info] '
+
+# SF-STALE, the 12 rows in the original order (instance, number, serial, desktop, kind); L = live (FourTerms), S = stale (FiveTerms).
+$RS_ROWS = @(
+    @($RS_INST_4352, 2, $RS_D2U, $RS_DESK1, 'S'),
+    @($RS_INST_4358, 2, $RS_EHU, $RS_DESK1, 'L'),
+    @($RS_INST_4352, 1, $RS_EHU, $RS_DESK1, 'L'),
+    @($RS_INST_4358, 2, $RS_EHU, $RS_DESK2, 'L'),
+    @($RS_INST_4352, 1, $RS_EHU, $RS_DESK2, 'L'),
+    @($RS_INST_4358, 1, $RS_D2U, $RS_DESK1, 'S'),
+    @($RS_INST_4358, 1, $RS_D2U, $RS_DESK2, 'S'),
+    @($RS_INST_4358, 1, $RS_D2U, $RS_DESK3, 'S'),
+    @($RS_INST_4352, 2, $RS_D2U, $RS_DESK2, 'S'),
+    @($RS_INST_4352, 2, $RS_D2U, $RS_DESK3, 'S'),
+    @($RS_INST_4352, 1, $RS_EHU, $RS_DESK3, 'L'),
+    @($RS_INST_4358, 2, $RS_EHU, $RS_DESK3, 'L')
+)
+$RS_ORIGINAL = @(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
+$RS_REVERSE = @(11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0)
+$RS_SHUFFLE = @(7, 2, 11, 0, 9, 4, 1, 10, 5, 8, 3, 6)
+
+# Custom layouts with exactly two layouts: FourTerms (2x2 grid, 4 zones) and FiveTerms (1x5 grid, 5 zones).
+$RS_CUSTOM = '{"custom-layouts":[' +
+    '{"uuid":"' + $RS_FOUR + '","name":"FourTerms","type":"grid","info":{"rows":2,"columns":2,"rows-percentage":[5000,5000],"columns-percentage":[5000,5000],"cell-child-map":[[0,1],[2,3]],"show-spacing":false,"spacing":0,"sensitivity-radius":20}},' +
+    '{"uuid":"' + $RS_FIVE + '","name":"FiveTerms","type":"grid","info":{"rows":1,"columns":5,"rows-percentage":[10000],"columns-percentage":[2000,2000,2000,2000,2000],"cell-child-map":[[0,1,2,3,4]],"show-spacing":false,"spacing":0,"sensitivity-radius":20}}]}'
+
+function New-RsRowJson([int]$Index, [bool]$Shared) {
+    $r = $RS_ROWS[$Index]
+    $uuid = $RS_FIVE
+    $zones = 5
+    if ($Shared -or $r[4] -eq 'L') { $uuid = $RS_FOUR; $zones = 4 }
+    '{"device":{"monitor":"' + $RS_ID + '","monitor-instance":"' + $r[0] + '","monitor-number":' + $r[1] +
+        ',"serial-number":"' + $r[2] + '","virtual-desktop":"' + $r[3] +
+        '"},"applied-layout":{"uuid":"' + $uuid + '","type":"custom","show-spacing":false,"spacing":0,"zone-count":' + $zones + ',"sensitivity-radius":20}}'
+}
+
+# SF-STALE (or SF-STALE-SHARED when $Shared) with its rows in the given order of original positions.
+function New-RsAppliedJson([int[]]$Order, [bool]$Shared) {
+    $rows = foreach ($i in $Order) { New-RsRowJson $i $Shared }
+    '{"applied-layouts":[' + (@($rows) -join ',') + ']}'
+}
+
+function New-RsLogLine([string]$Instance, [string]$Number, [string]$Serial, [string]$Desktop) {
+    '{0}Initialize layout on {1}_{2}_{3}_{4}_{5}, work area rect = 1920x1032' -f $RS_TS, $RS_ID, $Instance, $Number, $Serial, $Desktop
+}
+
+# The log of the Conventions: (1, EHU) for UID4352 and (2, EHU) for UID4358, on D1 and D2.
+function Get-RsStandardLog {
+    @(
+        (New-RsLogLine $RS_INST_4352 '1' $RS_EHU $RS_DESK1),
+        (New-RsLogLine $RS_INST_4358 '2' $RS_EHU $RS_DESK1),
+        (New-RsLogLine $RS_INST_4352 '1' $RS_EHU $RS_DESK2),
+        (New-RsLogLine $RS_INST_4358 '2' $RS_EHU $RS_DESK2)
+    ) -join "`r`n"
+}
+
+function Get-RsLogPath([string]$Dir) { Join-Path $Dir 'Logs\v0.102.2862\log_2026-10-23.log' }
+
+function Set-RsLog([string]$Dir, [string]$Text) {
+    $path = Get-RsLogPath $Dir
+    [void][IO.Directory]::CreateDirectory((Split-Path -Parent $path))
+    [IO.File]::WriteAllText($path, $Text + "`r`n", [Text.Encoding]::ASCII)
+}
+
+function Add-RsLogText([string]$Dir, [string]$Text) {
+    [IO.File]::AppendAllText((Get-RsLogPath $Dir), $Text + "`r`n", [Text.Encoding]::ASCII)
+}
+
+function Set-RsApplied([string]$Dir, [string]$Json) {
+    [IO.File]::WriteAllText((Join-Path $Dir 'applied-layouts.json'), $Json)
+}
+
+# A fresh FancyZones-shaped directory: applied-layouts.json, custom-layouts.json and the standard log.
+function New-RsDir([bool]$Shared) {
+    $dir = Join-Path ([IO.Path]::GetTempPath()) ('mon011-rs-' + [guid]::NewGuid().ToString('N'))
+    [void][IO.Directory]::CreateDirectory($dir)
+    Set-RsApplied $dir (New-RsAppliedJson $RS_ORIGINAL $Shared)
+    [IO.File]::WriteAllText((Join-Path $dir 'custom-layouts.json'), $RS_CUSTOM)
+    Set-RsLog $dir (Get-RsStandardLog)
+    $dir
+}
+
+function Remove-RsDir([string]$Dir) {
+    try { Remove-Item -LiteralPath $Dir -Recurse -Force -ErrorAction SilentlyContinue } catch { }
+}
+
+# A 1920x1080 monitor with a 1920x1032 work area at DPI 96 for the given instance, enumeration number and EDID serial.
+function New-RsMonitor([string]$Instance, [int]$Number, [string]$Serial) {
+    New-Object TerminalOrganizer.Core.Monitors.MonitorInfo -ArgumentList `
+        ('\\?\DISPLAY#' + $RS_ID + '#' + $Instance + '#{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}'), $RS_ID, $Instance, $Serial, $Number, `
+        0, 0, 1920, 1080, (New-TWorkArea 0 0 1920 1032)
+}
+
+# A resolver over the directory whose app-log lines are collected in $script:RsLines.
+function New-RsResolver([string]$Dir) {
+    $script:RsLines = New-Object 'System.Collections.Generic.List[string]'
+    $sink = [Action[string]] { param($line) $script:RsLines.Add($line) }
+    New-Object TerminalOrganizer.App.AppliedLayoutResolver -ArgumentList $Dir, $sink
+}
+
+function Get-RsSummary($Result) {
+    $zones = 0
+    if ($null -ne $Result.Zones) { $zones = $Result.Zones.Length }
+    '{0}|{1}|{2}' -f $Result.Kind.ToString(), $Result.LayoutName, $zones
+}
+
+Describe 'SPEC-MON-011 AC-011 Same row identity under a matching hint; the fallback is order-dependent' {
+    It 'ten calls with row-order rewrites and appended log lines all resolve FourTerms on the live row, with one decision line' {
+        $dir = New-RsDir $false
+        try {
+            $mon = New-RsMonitor $RS_INST_4352 1 $RS_D2U
+            $resolver = New-RsResolver $dir
+            for ($i = 1; $i -le 10; $i++) {
+                if ($i -eq 3) { Set-RsApplied $dir (New-RsAppliedJson $RS_REVERSE $false) }
+                if ($i -eq 6) { Set-RsApplied $dir (New-RsAppliedJson $RS_SHUFFLE $false) }
+                if ($i % 2 -eq 0) { Add-RsLogText $dir ($RS_TS + 'unrelated line ' + $i) }
+                (Get-RsSummary $resolver.Resolve($mon, $RS_DESK1)) | Should BeExactly 'Supported|FourTerms|4'
+            }
+            $script:RsLines.Count | Should Be 1
+            $script:RsLines[0].Contains('by LiveHint') | Should Be $true
+            $script:RsLines[0].Contains('number 1 serial XPG0H42JBEHU') | Should Be $true
+        }
+        finally { Remove-RsDir $dir }
+    }
+
+    It 'with the Logs folder removed and the original order the call yields the 5-zone FiveTerms layout of the stale row (the defect, pinned in the App path)' {
+        $dir = New-RsDir $false
+        try {
+            Remove-Item -LiteralPath (Join-Path $dir 'Logs') -Recurse -Force
+            $resolver = New-RsResolver $dir
+            (Get-RsSummary $resolver.Resolve((New-RsMonitor $RS_INST_4352 1 $RS_D2U), $RS_DESK1)) | Should BeExactly 'Supported|FiveTerms|5'
+            $script:RsLines.Count | Should Be 1
+            $script:RsLines[0].Contains('position 0 number 2 serial XPG0H42JBD2U') | Should Be $true
+        }
+        finally { Remove-RsDir $dir }
+    }
+
+    It 'with the Logs folder removed and the reverse order the same call yields the 4-zone FourTerms layout of the live row (the fallback depends on row order, as today)' {
+        $dir = New-RsDir $false
+        try {
+            Remove-Item -LiteralPath (Join-Path $dir 'Logs') -Recurse -Force
+            Set-RsApplied $dir (New-RsAppliedJson $RS_REVERSE $false)
+            $resolver = New-RsResolver $dir
+            (Get-RsSummary $resolver.Resolve((New-RsMonitor $RS_INST_4352 1 $RS_D2U), $RS_DESK1)) | Should BeExactly 'Supported|FourTerms|4'
+            $script:RsLines[0].Contains('number 1 serial XPG0H42JBEHU') | Should Be $true
+        }
+        finally { Remove-RsDir $dir }
+    }
+
+    It 'an absent applied-layouts file is the unsupported no-applied-layout result with no decision line, as today' {
+        $dir = New-RsDir $false
+        try {
+            Remove-Item -LiteralPath (Join-Path $dir 'applied-layouts.json') -Force
+            $resolver = New-RsResolver $dir
+            $r = $resolver.Resolve((New-RsMonitor $RS_INST_4352 1 $RS_D2U), $RS_DESK1)
+            $r.Kind.ToString() | Should BeExactly 'Unsupported'
+            $r.Reason.ToString() | Should BeExactly 'NoAppliedLayout'
+            $script:RsLines.Count | Should Be 0
+        }
+        finally { Remove-RsDir $dir }
+    }
+
+    It 'a malformed applied-layouts file is the invalid malformed-json result with no decision line, as today' {
+        $dir = New-RsDir $false
+        try {
+            Set-RsApplied $dir '{ not json'
+            $resolver = New-RsResolver $dir
+            $r = $resolver.Resolve((New-RsMonitor $RS_INST_4352 1 $RS_D2U), $RS_DESK1)
+            $r.Kind.ToString() | Should BeExactly 'Invalid'
+            $r.Reason.ToString() | Should BeExactly 'MalformedJson'
+            $script:RsLines.Count | Should Be 0
+        }
+        finally { Remove-RsDir $dir }
+    }
+
+    It 'a lowercase ToString("B") desktop resolves the same row and keeps one decision line with the upper-case GUID' {
+        $dir = New-RsDir $false
+        try {
+            $resolver = New-RsResolver $dir
+            $mon = New-RsMonitor $RS_INST_4352 1 $RS_D2U
+            (Get-RsSummary $resolver.Resolve($mon, $RS_DESK1)) | Should BeExactly 'Supported|FourTerms|4'
+            (Get-RsSummary $resolver.Resolve($mon, ([Guid]$RS_DESK1).ToString('B'))) | Should BeExactly 'Supported|FourTerms|4'
+            $script:RsLines.Count | Should Be 1
+            $script:RsLines[0].Contains('desktop ' + $RS_DESK1 + ' by') | Should Be $true
+        }
+        finally { Remove-RsDir $dir }
+    }
+}
+
+Describe 'SPEC-MON-011 AC-012 Fallback states and explicit line counts' {
+    It 'five states over one resolver give the pinned reader codes, rules, rows and total line counts' {
+        $dir = New-RsDir $false
+        $lock = $null
+        try {
+            $mon = New-RsMonitor $RS_INST_4352 1 $RS_D2U
+            $resolver = New-RsResolver $dir
+            $logPath = Get-RsLogPath $dir
+
+            # State 1: the directory as built.
+            for ($i = 0; $i -lt 3; $i++) { (Get-RsSummary $resolver.Resolve($mon, $RS_DESK1)) | Should BeExactly 'Supported|FourTerms|4' }
+            $script:RsLines.Count | Should Be 1
+            $script:RsLines[0].Contains('by LiveHint') | Should Be $true
+
+            # State 2: the whole Logs folder deleted.
+            Remove-Item -LiteralPath (Join-Path $dir 'Logs') -Recurse -Force
+            for ($i = 0; $i -lt 3; $i++) { (Get-RsSummary $resolver.Resolve($mon, $RS_DESK1)) | Should BeExactly 'Supported|FiveTerms|5' }
+            $script:RsLines.Count | Should Be 2
+            $script:RsLines[1].Contains('NoLogsFolder') | Should Be $true
+            $script:RsLines[1].Contains('by DocumentOrder') | Should Be $true
+            $script:RsLines[1].Contains('number 2 serial XPG0H42JBD2U') | Should Be $true
+
+            # State 3: the log recreated as the only file, held open with share none.
+            [void][IO.Directory]::CreateDirectory((Split-Path -Parent $logPath))
+            $lock = [IO.File]::Open($logPath, [IO.FileMode]::Create, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+            for ($i = 0; $i -lt 3; $i++) { (Get-RsSummary $resolver.Resolve($mon, $RS_DESK1)) | Should BeExactly 'Supported|FiveTerms|5' }
+            $script:RsLines.Count | Should Be 2
+
+            # State 4: the lock released and the file overwritten with binary noise.
+            $lock.Dispose()
+            $lock = $null
+            $noise = New-Object byte[] 4096
+            for ($i = 0; $i -lt $noise.Length; $i++) { $noise[$i] = [byte](($i * 37 + 11) % 256) }
+            [IO.File]::WriteAllBytes($logPath, $noise)
+            for ($i = 0; $i -lt 3; $i++) { (Get-RsSummary $resolver.Resolve($mon, $RS_DESK1)) | Should BeExactly 'Supported|FiveTerms|5' }
+            $script:RsLines.Count | Should Be 2
+
+            # State 5: the file overwritten with the valid log of the Conventions.
+            Set-RsLog $dir (Get-RsStandardLog)
+            for ($i = 0; $i -lt 3; $i++) { (Get-RsSummary $resolver.Resolve($mon, $RS_DESK1)) | Should BeExactly 'Supported|FourTerms|4' }
+            $script:RsLines.Count | Should Be 3
+            $script:RsLines[2].Contains('by LiveHint') | Should Be $true
+        }
+        finally {
+            if ($null -ne $lock) { $lock.Dispose() }
+            Remove-RsDir $dir
+        }
+    }
+}
+
+Describe 'SPEC-MON-011 AC-013 Decision-line deduplication, null row and fields' {
+    It 'steps a to f over SF-STALE-SHARED give the pinned total line counts and line texts' {
+        $dir = New-RsDir $true
+        try {
+            $mon4352 = New-RsMonitor $RS_INST_4352 1 $RS_D2U
+            $mon4358 = New-RsMonitor $RS_INST_4358 2 $RS_EHU
+            $monNone = New-RsMonitor $RS_INST_NONE 3 'XPG0H42JBZZZ'
+            $resolver = New-RsResolver $dir
+
+            # a: 20 calls, nothing changed.
+            for ($i = 0; $i -lt 20; $i++) { (Get-RsSummary $resolver.Resolve($mon4352, $RS_DESK1)) | Should BeExactly 'Supported|FourTerms|4' }
+            $script:RsLines.Count | Should Be 1
+            $script:RsLines[0] | Should BeExactly ('applied row: monitor 1 desktop ' + $RS_DESK1 + ' by LiveHint (hint 1, XPG0H42JBEHU, log_2026-10-23.log) position 2 number 1 serial XPG0H42JBEHU layout ' + $RS_FOUR)
+
+            # b: reverse row order and five unrelated log lines; the position changed, the identity did not.
+            Set-RsApplied $dir (New-RsAppliedJson $RS_REVERSE $true)
+            for ($i = 0; $i -lt 5; $i++) { Add-RsLogText $dir ($RS_TS + 'unrelated line ' + $i) }
+            for ($i = 0; $i -lt 5; $i++) { (Get-RsSummary $resolver.Resolve($mon4352, $RS_DESK1)) | Should BeExactly 'Supported|FourTerms|4' }
+            $script:RsLines.Count | Should Be 1
+
+            # c: original order again, no Logs folder; live and stale rows share a uuid, yet the line count rises.
+            Set-RsApplied $dir (New-RsAppliedJson $RS_ORIGINAL $true)
+            Remove-Item -LiteralPath (Join-Path $dir 'Logs') -Recurse -Force
+            for ($i = 0; $i -lt 3; $i++) { (Get-RsSummary $resolver.Resolve($mon4352, $RS_DESK1)) | Should BeExactly 'Supported|FourTerms|4' }
+            $script:RsLines.Count | Should Be 2
+            $script:RsLines[1] | Should BeExactly ('applied row: monitor 1 desktop ' + $RS_DESK1 + ' by DocumentOrder (no hint: NoLogsFolder) position 0 number 2 serial XPG0H42JBD2U layout ' + $RS_FOUR)
+
+            # d: the log recreated, a different monitor stable key.
+            Set-RsLog $dir (Get-RsStandardLog)
+            (Get-RsSummary $resolver.Resolve($mon4358, $RS_DESK1)) | Should BeExactly 'Supported|FourTerms|4'
+            $script:RsLines.Count | Should Be 3
+            $script:RsLines[2] | Should BeExactly ('applied row: monitor 2 desktop ' + $RS_DESK1 + ' by LiveHint (hint 2, XPG0H42JBEHU, log_2026-10-23.log) position 1 number 2 serial XPG0H42JBEHU layout ' + $RS_FOUR)
+
+            # e: ID-NONE, no UID9999 line in the log: no instance-exact row, chosen row none.
+            for ($i = 0; $i -lt 5; $i++) {
+                $r = $resolver.Resolve($monNone, $RS_DESK1)
+                $r.Kind.ToString() | Should BeExactly 'Unsupported'
+                $r.Reason.ToString() | Should BeExactly 'NoAppliedLayout'
+            }
+            $script:RsLines.Count | Should Be 4
+            $script:RsLines[3] | Should BeExactly ('applied row: monitor 3 desktop ' + $RS_DESK1 + ' by DocumentOrder (no hint: NoMatchingLine) row none')
+
+            # f: a UID9999 line with (3, S9) appended: a hint, no row carries it; the rule changes the key.
+            Add-RsLogText $dir (New-RsLogLine $RS_INST_NONE '3' 'S9' $RS_DESK1)
+            for ($i = 0; $i -lt 5; $i++) { $resolver.Resolve($monNone, $RS_DESK1).Kind.ToString() | Should BeExactly 'Unsupported' }
+            $script:RsLines.Count | Should Be 5
+            $script:RsLines[4] | Should BeExactly ('applied row: monitor 3 desktop ' + $RS_DESK1 + ' by HintUnmatched (hint 3, S9, log_2026-10-23.log) row none')
+        }
+        finally { Remove-RsDir $dir }
+    }
+}
+
+Describe 'SPEC-MON-011 composition and tool wiring' {
+    $trayText = [IO.File]::ReadAllText((Join-Path $repoRoot 'src\TerminalOrganizer.App\TrayContext.cs'))
+    $resolverPath = Join-Path $repoRoot 'src\TerminalOrganizer.App\AppliedLayoutResolver.cs'
+
+    It 'TrayContext builds the layout resolution from AppliedLayoutResolver and no longer selects rows itself' {
+        $trayText.Contains('new AppliedLayoutResolver(') | Should Be $true
+        $trayText.Contains('AppliedEntrySelector') | Should Be $false
+        $trayText.Contains('FancyZonesJsonReader') | Should Be $false
+    }
+
+    It 'Composition.Build keeps exactly the two parameters (LogSink, LabelRegistry)' {
+        $compositionType = [TerminalOrganizer.App.TrayMenuBuilder].Assembly.GetType('TerminalOrganizer.App.Composition', $true)
+        $build = $compositionType.GetMethod('Build', [Reflection.BindingFlags]'NonPublic,Static')
+        $names = @($build.GetParameters() | ForEach-Object { $_.ParameterType.Name })
+        ($names -join ',') | Should BeExactly 'LogSink,LabelRegistry'
+    }
+
+    It 'the new resolver file exists, holds no FileSystemWatcher, Timer or Stopwatch and no AskUserQuestion' {
+        Test-Path $resolverPath | Should Be $true
+        $text = [IO.File]::ReadAllText($resolverPath)
+        ($text -match 'FileSystemWatcher|Timer|Stopwatch|AskUserQuestion') | Should Be $false
+    }
+
+    It 'organize-once.ps1 -SelfTest exits 0, and the tool uses the resolver with no closure copy of its own' {
+        $ps51 = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $tool = Join-Path $repoRoot 'tools\organize-once.ps1'
+        $out = & $ps51 -NoProfile -ExecutionPolicy Bypass -File $tool -SelfTest
+        $LASTEXITCODE | Should Be 0
+        (@($out | Where-Object { $_ -like 'FAIL: *' }).Count) | Should Be 0
+        $text = [IO.File]::ReadAllText($tool)
+        $text.Contains('AppliedLayoutResolver') | Should Be $true
+        $text.Contains('AppliedEntrySelector') | Should Be $false
+        ($text -match 'ReadAllText\(\s*\$appliedPath') | Should Be $false
+        ($text -match '\$appliedPath') | Should Be $false
+        ($text -match '[^\x00-\x7F]') | Should Be $false
+    }
+
+    It 'organize-dryrun.ps1 declares -FancyZonesLogs, decides rows through Decide and prints the rule line; its -SelfTest asserts row decided by: LiveHint' {
+        $ps51 = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $tool = Join-Path $repoRoot 'tools\organize-dryrun.ps1'
+        $text = [IO.File]::ReadAllText($tool)
+        ($text -match '\[string\]\$FancyZonesLogs') | Should Be $true
+        $text.Contains('AppliedEntrySelector]::Decide(') | Should Be $true
+        $text.Contains('row decided by:') | Should Be $true
+        $text.Contains('AppliedEntrySelector]::Select(') | Should Be $false
+        ($text -match '[^\x00-\x7F]') | Should Be $false
+        $out = & $ps51 -NoProfile -ExecutionPolicy Bypass -File $tool -SelfTest
+        $LASTEXITCODE | Should Be 0
+        (@($out | Where-Object { $_ -like 'FAIL: *' }).Count) | Should Be 0
+        (@($out | Where-Object { $_ -eq 'PASS: mon011/row-decided-by' }).Count) | Should Be 1
+        (@($out | Where-Object { $_ -ceq 'row decided by: LiveHint' }).Count) | Should Be 1
+    }
+}
+
+# --- SPEC-RULES-010 M3: menu-path rule-timeout logging and the first ReportRuleTimeouts test ---
+# Expected values come from SPEC-RULES-010 acceptance.md and plan.md section J, never from the code under test.
+# RuleDiagnosticLog is process-wide and has no reset: AC-008 owns the rule positions 41 to 43 and must run once per fresh process.
+
+function New-R10Rules([int]$Fillers, [string[]]$Hostile) {
+    $defs = New-Object 'System.Collections.Generic.List[object]'
+    for ($i = 1; $i -le $Fillers; $i++) {
+        $defs.Add(@{ match = ('filler-' + $i + '*') })
+    }
+    foreach ($h in $Hostile) {
+        $defs.Add(@{ match = $h })
+    }
+    [TerminalOrganizer.Core.Rules.RuleSetBuilder]::Build([object[]]$defs.ToArray(), $false)
+}
+
+function New-R10Snapshots($Rules, [int]$Count) {
+    $title = ('a' * 30) + 'b'
+    $acquired = New-Object 'System.Collections.Generic.List[object]'
+    for ($i = 1; $i -le $Count; $i++) {
+        $acquired.Add((New-R9Acquired (900 + $i) ([string[]]@($title))))
+    }
+    , ([TerminalOrganizer.Core.Windows.WindowSnapshot[]]@(Get-R9Snapshots $acquired.ToArray() @() $Rules))
+}
+
+# Returns the text between the opening character that precedes $Start and its matching closing character.
+function Get-R10Span([string]$Text, [int]$Start, [string]$Open, [string]$Close) {
+    $depth = 1
+    for ($i = $Start; $i -lt $Text.Length; $i++) {
+        $ch = [string]$Text[$i]
+        if ($ch -ceq $Open) { $depth++ }
+        elseif ($ch -ceq $Close) {
+            $depth--
+            if ($depth -eq 0) { return $Text.Substring($Start, $i - $Start) }
+        }
+    }
+    $null
+}
+
+# Returns the last top-level argument of an argument-list text.
+function Get-R10LastArg([string]$Text) {
+    $depth = 0
+    $last = 0
+    for ($i = 0; $i -lt $Text.Length; $i++) {
+        $ch = [string]$Text[$i]
+        if ($ch -ceq '(' -or $ch -ceq '{' -or $ch -ceq '[') { $depth++ }
+        elseif ($ch -ceq ')' -or $ch -ceq '}' -or $ch -ceq ']') { $depth-- }
+        elseif ($ch -ceq ',' -and $depth -eq 0) { $last = $i + 1 }
+    }
+    $Text.Substring($last).Trim()
+}
+
+Describe 'SPEC-RULES-010 AC-008 ReportRuleTimeouts: first test, one line per rule position' {
+    It 'skipped evaluations add no line; repeats and a second compose add none; a new position adds exactly one; null inputs are safe' {
+        $composition = [TerminalOrganizer.App.AppSettings].Assembly.GetType('TerminalOrganizer.App.Composition')
+        $report = $composition.GetMethod('ReportRuleTimeouts', [Reflection.BindingFlags]'NonPublic,Static')
+        $report | Should Not BeNullOrEmpty
+        $script:R10Lines = New-Object 'System.Collections.Generic.List[string]'
+        $sink = [Action[string]] { param($m) $script:R10Lines.Add($m) }
+
+        $l1 = New-R10Rules 40 @('regex:^(a+)+$', 'regex:^(a+)+c$')
+        $snaps = New-R10Snapshots $l1 3
+        $diags = @($snaps | ForEach-Object { $_.RuleDiagnostics })
+        $diags.Count | Should Be 6
+        @($diags | Where-Object { $_.Position -eq 41 }).Count | Should Be 3
+        @($diags | Where-Object { $_.Position -eq 42 }).Count | Should Be 3
+        @($diags | Where-Object { $_.Reason -ceq 'regex timeout (skipped after repeated timeouts)' }).Count | Should Be 2
+
+        [void]$report.Invoke($null, [object[]]@($snaps, $sink))
+        $script:R10Lines.Count | Should Be 2
+        $script:R10Lines[0] | Should BeExactly 'title rule 41 timed out; treated as no match'
+        $script:R10Lines[1] | Should BeExactly 'title rule 42 timed out; treated as no match'
+
+        foreach ($repeat in 1..3) {
+            [void]$report.Invoke($null, [object[]]@($snaps, $sink))
+        }
+        $script:R10Lines.Count | Should Be 2
+
+        $again = New-R10Snapshots $l1 1
+        @($again | ForEach-Object { $_.RuleDiagnostics }).Count | Should Be 2
+        [void]$report.Invoke($null, [object[]]@($again, $sink))
+        $script:R10Lines.Count | Should Be 2
+
+        $l2 = New-R10Rules 42 @('regex:^(a+)+$')
+        $third = New-R10Snapshots $l2 1
+        @($third | ForEach-Object { $_.RuleDiagnostics }).Count | Should Be 1
+        [void]$report.Invoke($null, [object[]]@($third, $sink))
+        $script:R10Lines.Count | Should Be 3
+        $script:R10Lines[2] | Should BeExactly 'title rule 43 timed out; treated as no match'
+    }
+
+    It 'a null sink, a null snapshot array and a null snapshot element write no line and throw nothing' {
+        $composition = [TerminalOrganizer.App.AppSettings].Assembly.GetType('TerminalOrganizer.App.Composition')
+        $report = $composition.GetMethod('ReportRuleTimeouts', [Reflection.BindingFlags]'NonPublic,Static')
+        $script:R10Lines = New-Object 'System.Collections.Generic.List[string]'
+        $sink = [Action[string]] { param($m) $script:R10Lines.Add($m) }
+        $withNull = [Array]::CreateInstance([TerminalOrganizer.Core.Windows.WindowSnapshot], 1)
+        $snaps = New-R10Snapshots (New-R10Rules 40 @('regex:^(a+)+$')) 1
+        $caught = $null
+        try {
+            [void]$report.Invoke($null, [object[]]@($snaps, $null))
+            [void]$report.Invoke($null, [object[]]@($null, $sink))
+            [void]$report.Invoke($null, [object[]]@($withNull, $sink))
+        }
+        catch {
+            $caught = $_
+        }
+        $caught | Should BeNullOrEmpty
+        $script:R10Lines.Count | Should Be 0
+    }
+}
+
+Describe 'SPEC-RULES-010 AC-009 the menu read logs rule timeouts and nothing else' {
+    $text = [IO.File]::ReadAllText((Join-Path $repoRoot 'src\TerminalOrganizer.App\TrayContext.cs'))
+
+    It 'ReadWindowsForMenu has exactly two parameters: a LabelRegistry and an Action of string' {
+        $composition = [TerminalOrganizer.App.AppSettings].Assembly.GetType('TerminalOrganizer.App.Composition')
+        $method = $composition.GetMethod('ReadWindowsForMenu', [Reflection.BindingFlags]'NonPublic,Static')
+        $method | Should Not BeNullOrEmpty
+        $params = $method.GetParameters()
+        $params.Count | Should Be 2
+        $params[0].ParameterType.Name | Should BeExactly 'LabelRegistry'
+        ($params[1].ParameterType -eq [Action[string]]) | Should Be $true
+    }
+
+    It 'the body reports through ReportRuleTimeouts with its second parameter, and the Discover trace argument stays the literal null' {
+        $decl = [regex]::Match($text, 'DiscoveredWindows\s+ReadWindowsForMenu\s*\(\s*LabelRegistry\s+\w+\s*,\s*Action<string>\s+(\w+)\s*\)\s*\{')
+        $decl.Success | Should Be $true
+        $sinkName = $decl.Groups[1].Value
+        $body = Get-R10Span $text ($decl.Index + $decl.Length) '{' '}'
+        $body | Should Not BeNullOrEmpty
+        ($body -match ('ReportRuleTimeouts\([^;]*\b' + $sinkName + '\b')) | Should Be $true
+        $discover = $body.IndexOf('Discover(', [StringComparison]::Ordinal)
+        ($discover -ge 0) | Should Be $true
+        $discoverArgs = Get-R10Span $body ($discover + 'Discover('.Length) '(' ')'
+        $discoverArgs | Should Not BeNullOrEmpty
+        (Get-R10LastArg $discoverArgs) | Should BeExactly 'null'
+    }
+
+    It 'each of the three call sites passes a second argument that is not null and reaches log.Append' {
+        $sites = [regex]::Matches($text, 'ReadWindowsForMenu\(ports\.Controller\.Labels,')
+        $sites.Count | Should Be 3
+        foreach ($site in $sites) {
+            $span = (Get-R10Span $text ($site.Index + $site.Length) '(' ')').Trim()
+            $span | Should Not BeNullOrEmpty
+            ($span -match '^null\b') | Should Be $false
+            $direct = $span -match 'log\.Append\b'
+            if (-not $direct) {
+                ($span -match '^[A-Za-z_][A-Za-z0-9_]*$') | Should Be $true
+                $shellStart = $text.IndexOf('class TrayShell', [StringComparison]::Ordinal)
+                $helper = [regex]::Match($text.Substring($shellStart), '\b' + $span + '\s*\([^)]*\)\s*\{')
+                $helper.Success | Should Be $true
+                $helperBody = Get-R10Span $text ($shellStart + $helper.Index + $helper.Length) '{' '}'
+                ($helperBody -match 'log\.Append\b') | Should Be $true
+            }
+        }
+    }
+
+    It 'the organize run and the world capture still pass the app log as the discovery trace' {
+        $kept = [regex]::Matches($text, 'ports\.RunToken,\s*delegate\(string message\)\s*\{\s*log\.Append\(message\);\s*\}\)')
+        $kept.Count | Should BeGreaterThan 1
+    }
+}

@@ -96,6 +96,7 @@ A rule may also set a fixed `name` and a fixed `rank`. The identity name comes f
 - Identity follows the title, so a renamed window is a new identity. A manager or priority choice saved by identity keeps working while a rule still maps the new title to the same name; use a `name` capture or a fixed `name` when a title changes with the running command.
 - Command-line rules apply only to launcher-session tabs: plain PowerShell, cmd and ssh windows have no command line to match.
 - A settings file that is missing at upgrade, or that is reset after corruption, starts with the preset off.
+- A regex rule that times out (100 ms) twice during one scan is skipped for the rest of that scan and reported as a diagnostic; the tray menu rebuild writes one log line per such rule position per run of the app.
 
 If you prefer not to put priorities in titles, add `priorityOverrides` entries to settings.json, for example `"priorityOverrides": [ { "kind": "identity", "value": "YODA1", "rank": 120 } ]` (`kind` is `session`, `userlabel`, `rawtitle` or `identity`, case ignored; `rank` is 0 to 999). The tray menu does not set ranks; it shows each window's rank and where it came from.
 
@@ -112,7 +113,7 @@ Cancelling the dialog moves nothing at all — cancellation performs zero mutati
 
 ### Layouts follow virtual desktops
 
-Layouts are read per current virtual desktop, per monitor, at every organize request. Switch to another desktop, apply a different FancyZones layout there, press `Ctrl+Alt+O` — that desktop's layout is the one used.
+Layouts are read per current virtual desktop, per monitor, at every organize request. Switch to another desktop, apply a different FancyZones layout there, press `Ctrl+Alt+O` — that desktop's layout is the one used. When FancyZones keeps more than one row for a monitor on the same desktop, the app picks the live row from the newest "Initialize layout on" line in FancyZones' own log; if the log cannot be read it uses the first matching row in the file, as before. The `applied row:` line in the app log shows which rule decided.
 
 ### Result counts
 
@@ -148,9 +149,9 @@ Optional power-user scripts (PowerShell) in the `tools\` folder:
 
 | Script | What it does |
 | --- | --- |
-| `tools\dump-monitors.ps1` | Print the monitor topology as the app sees it |
+| `tools\dump-monitors.ps1` | Print the monitor topology as the app sees it, plus the live-row hint for each monitor; with `-AppliedLayouts <path>` also the first-row result, the hinted result and the deciding rule (`-FancyZonesLogs <path>` overrides the log folder) |
 | `tools\dump-windows.ps1 -Monitor N` | List Windows Terminal windows on one monitor; `-AllMonitors` for all |
-| `tools\organize-dryrun.ps1 -Monitor N` | Preview the placement plan — moves nothing |
+| `tools\organize-dryrun.ps1 -Monitor N` | Preview the placement plan — moves nothing; prints a `row decided by:` line (`-FancyZonesLogs <path>` overrides the log folder) |
 | `tools\organize-once.ps1` | One headless organize run |
 | `tools\merge-test.ps1` | Supervised session-merge drill (see above) |
 
@@ -187,6 +188,8 @@ In `%LOCALAPPDATA%\TerminalOrganizer\settings.json`.
 - **Hotkey-driven, not automatic.** New terminal windows are not placed until you organize again.
 - **Maximized or minimized windows are restored first; full-screen windows are skipped.**
 - **Session merge is a supervised command-line drill**, not a menu action, and stays off unless you run it yourself.
+- **The live row comes from the FancyZones log.** The log format was observed on one PC (PowerToys v0.102.x). When the log cannot be read or has no matching line, the app falls back to the first matching row in the file without a prompt (the `applied row:` log line records the fallback). The cost of reading the log on each hotkey press has not been measured.
+- **A slow regex title rule is skipped after its second timeout in one scan.** A later window that rule would have matched can then miss it, and skipped evaluations still count as diagnostics. The saving (about 0.65 s residual for 3 hostile rules and 8 windows) is computed, not measured.
 - **Single instance.** A second copy exits immediately; the running one keeps the hotkey.
 - **A window's identity follows the window title.** Rename a tab and the window is a new identity; a manager or priority choice saved by identity keeps applying only while a title rule still maps the new title to the same name.
 

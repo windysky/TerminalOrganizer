@@ -15,14 +15,27 @@ namespace TerminalOrganizer.Core.Rules
     {
         private const string NameGroup = "name";
         private const string RankGroup = "rank";
+        private const string TimeoutReason = "regex timeout";
+        private const string SkippedReason = "regex timeout (skipped after repeated timeouts)";
 
         /// <summary>
         /// Evaluates one tab. The commandLine is the command line of the launcher session the tab
         /// is bound to, or null when the tab is bound to no session; a commandline rule never
         /// matches a null command line. An unmatched tab, or a matched rule that names no one,
-        /// is named by its trimmed title (null when the title is blank).
+        /// is named by its trimmed title (null when the title is blank). Stateless: no rule is
+        /// ever skipped.
         /// </summary>
+        // @MX:NOTE: deliberately stateless; one tab runs each rule once, so per-tab semantics are unchanged by the breaker (SPEC-RULES-010).
         public static TabRuleResult EvaluateTab(RuleSet rules, string title, string commandLine)
+        {
+            return EvaluateTab(rules, title, commandLine, null);
+        }
+
+        /// <summary>
+        /// Evaluates one tab against a caller-supplied breaker state: a regex rule tripped in the
+        /// state is skipped, and a regex timeout is recorded in it. A null state means no breaker.
+        /// </summary>
+        public static TabRuleResult EvaluateTab(RuleSet rules, string title, string commandLine, RuleEvaluationState state)
         {
             string fallbackName = IsBlank(title) ? null : title.Trim();
             List<RuleDiagnostic> diagnostics = new List<RuleDiagnostic>();
@@ -32,7 +45,7 @@ namespace TerminalOrganizer.Core.Rules
                 {
                     string name;
                     int? rank;
-                    if (Apply(rule, title, commandLine, fallbackName, diagnostics, out name, out rank))
+                    if (Apply(rule, title, commandLine, fallbackName, state, diagnostics, out name, out rank))
                     {
                         return new TabRuleResult(true, name, rank, rule.Reference, diagnostics.ToArray());
                     }
@@ -52,11 +65,22 @@ namespace TerminalOrganizer.Core.Rules
         // @MX:REASON: SPEC-RULES-009 consumers (manager candidacy, labels, assignment, overflow priority) depend on this one result.
         public static WindowRuleOutcome EvaluateWindow(RuleSet rules, TabSnapshot[] tabs, string windowTitle)
         {
+            return EvaluateWindow(rules, tabs, windowTitle, null);
+        }
+
+        /// <summary>
+        /// Evaluates one window against a caller-supplied breaker state shared by all its tabs (and by
+        /// every other window the caller evaluates with the same state). A null state becomes a fresh
+        /// state for this window alone.
+        /// </summary>
+        public static WindowRuleOutcome EvaluateWindow(RuleSet rules, TabSnapshot[] tabs, string windowTitle, RuleEvaluationState state)
+        {
             List<RuleDiagnostic> diagnostics = new List<RuleDiagnostic>();
             if (tabs == null || tabs.Length == 0)
             {
                 return new WindowRuleOutcome(IsBlank(windowTitle) ? null : windowTitle.Trim(), null, null, diagnostics.ToArray());
             }
+            RuleEvaluationState scope = state ?? new RuleEvaluationState();
             string identityName = null;
             string firstReference = null;
             int? rank = null;
@@ -66,7 +90,7 @@ namespace TerminalOrganizer.Core.Rules
                 TabSnapshot tab = tabs[i];
                 string title = tab == null ? null : tab.Title;
                 string commandLine = tab == null || tab.Session == null ? null : tab.Session.CommandLine;
-                TabRuleResult result = EvaluateTab(rules, title, commandLine);
+                TabRuleResult result = EvaluateTab(rules, title, commandLine, scope);
                 diagnostics.AddRange(result.Diagnostics);
                 if (i == 0)
                 {
@@ -84,7 +108,7 @@ namespace TerminalOrganizer.Core.Rules
 
         /// <summary>Applies one rule; true when it matched, with the sourced name and rank.</summary>
         private static bool Apply(CompiledRule rule, string title, string commandLine, string fallbackName,
-            List<RuleDiagnostic> diagnostics, out string name, out int? rank)
+            RuleEvaluationState state, List<RuleDiagnostic> diagnostics, out string name, out int? rank)
         {
             name = null;
             rank = null;
@@ -105,10 +129,17 @@ namespace TerminalOrganizer.Core.Rules
                     }
                     break;
                 case RuleKind.Regex:
+                    // A rule tripped in this scope does not run its regular expression again; it still reports.
+                    if (state != null && state.IsTripped(rule))
+                    {
+                        state.RecordSkip();
+                        diagnostics.Add(new RuleDiagnostic(rule.Position, SkippedReason));
+                        return false;
+                    }
                     try
                     {
-                        // @MX:WARN: user-supplied pattern runs here; the 100 ms timeout compiled into the Regex is the only bound.
-                        // @MX:REASON: catastrophic backtracking would otherwise stall every window evaluation; a timeout becomes a diagnostic and a no-match.
+                        // @MX:WARN: user-supplied pattern runs here; the 100 ms timeout compiled into the Regex is the bound, and a rule is skipped after its second timeout in the scope.
+                        // @MX:REASON: catastrophic backtracking would otherwise stall every window evaluation; a timeout becomes a diagnostic and a no-match, and the second one trips the rule for the rest of the scope.
                         Match match = rule.Regex.Match(subject);
                         if (!match.Success)
                         {
@@ -127,7 +158,11 @@ namespace TerminalOrganizer.Core.Rules
                     }
                     catch (RegexMatchTimeoutException)
                     {
-                        diagnostics.Add(new RuleDiagnostic(rule.Position, "regex timeout"));
+                        if (state != null)
+                        {
+                            state.RecordTimeout(rule);
+                        }
+                        diagnostics.Add(new RuleDiagnostic(rule.Position, TimeoutReason));
                         return false;
                     }
                     break;

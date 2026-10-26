@@ -8,13 +8,17 @@
 #                 target zone/rect, no-move / restore-first / stacked / full-screen-skip
 #                 markers, plus the manager pin or skip reason. Live output is
 #                 informational (morning checklist), NOT an acceptance claim.
+#                 SPEC-MON-011: the applied-layouts row is decided with the FancyZones log hint
+#                 (-FancyZonesLogs <path>, default: the real FancyZones Logs folder) and a
+#                 'row decided by: <rule>' line is printed per planned monitor.
 param(
     [switch]$SelfTest,
     [int]$Monitor = 1,
     [switch]$AllMonitors,
     [string]$SettingsPath,
     [string]$AppliedLayoutsPath,
-    [string]$CustomLayoutsPath
+    [string]$CustomLayoutsPath,
+    [string]$FancyZonesLogs
 )
 
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -25,6 +29,10 @@ if (-not $SettingsPath) {
     $SettingsPath = Join-Path $env:LOCALAPPDATA 'TerminalOrganizer\settings.json'
 }
 $fancyZonesDir = Join-Path $env:LOCALAPPDATA 'Microsoft\PowerToys\FancyZones'
+if (-not $FancyZonesLogs) {
+    # SPEC-MON-011: the FancyZones Logs folder that holds the live-row hint (Logs\<version>\log_YYYY-MM-DD.log).
+    $FancyZonesLogs = Join-Path $fancyZonesDir 'Logs'
+}
 if (-not $AppliedLayoutsPath) {
     $AppliedLayoutsPath = Join-Path $fancyZonesDir 'applied-layouts.json'
 }
@@ -91,6 +99,11 @@ function Invoke-ManagerAssign($Zones, $Facts, $Snapshots, $Selector) {
     $fallback = $null
     if (-not $Selector.IsEmpty) { $fallback = $Selector.RawTitleFallback }
     Invoke-Assign $Zones $Facts $fallback
+}
+
+# SPEC-MON-011 REQ-TOOL-002: the rule that decided the applied-layouts row (LiveHint, HintUnmatched or DocumentOrder).
+function Get-DecidedLine($Decision) {
+    'row decided by: ' + $Decision.Rule.ToString()
 }
 
 function Get-Move($Plan, [string]$WindowId) {
@@ -294,6 +307,21 @@ if ($SelfTest) {
     $ac11PreviewOk = @($ac11Move.Moves).Count -eq 1 -and $ac11Move.Moves[0].WindowId -ceq 'ac11-3' -and $ac11Move.Moves[0].PriorityReason -ceq 'derived rank 450'
     Assert-Check 'ac011/preview' $ac11PreviewOk 'one planned move for Untitled tab carrying derived rank 450'
 
+    # --- SPEC-MON-011 row: the rule line of the hinted row decision (inputs pinned here, never derived from the code under test) ---
+    # SF-STALE rows 0 (stale: number 2, D2U) and 2 (live: number 1, EHU) of UID4352 on D1; the log hint is (1, XPG0H42JBEHU).
+    $m11Inst = '5&22cafbe4&0&UID4352'
+    $m11Desktop = '{9089F388-5216-49EA-9CD4-07E910D817EB}'
+    $m11Json = '{"applied-layouts":[' +
+        '{"device":{"monitor":"DEL4091","monitor-instance":"' + $m11Inst + '","monitor-number":2,"serial-number":"XPG0H42JBD2U","virtual-desktop":"' + $m11Desktop + '"},"applied-layout":{"uuid":"{00000000-0000-0000-0000-000000000001}","type":"custom","show-spacing":true,"spacing":0,"zone-count":2}},' +
+        '{"device":{"monitor":"DEL4091","monitor-instance":"' + $m11Inst + '","monitor-number":1,"serial-number":"XPG0H42JBEHU","virtual-desktop":"' + $m11Desktop + '"},"applied-layout":{"uuid":"{00000000-0000-0000-0000-000000000001}","type":"custom","show-spacing":true,"spacing":0,"zone-count":2}}]}'
+    $m11Doc = [TerminalOrganizer.Core.Layouts.FancyZonesJsonReader]::ParseAppliedLayouts($m11Json)
+    $m11Identity = New-Object TerminalOrganizer.Core.Monitors.MonitorIdentity -ArgumentList 'DEL4091', $m11Inst, 1, 'XPG0H42JBD2U'
+    $m11Hint = New-Object TerminalOrganizer.Core.Monitors.LiveRowHint -ArgumentList 1, 'XPG0H42JBEHU', 'log_2026-10-23.log'
+    $m11Decision = [TerminalOrganizer.Core.Monitors.AppliedEntrySelector]::Decide($m11Doc, $m11Identity, $m11Desktop, $m11Hint)
+    $m11Line = Get-DecidedLine $m11Decision
+    Assert-Check 'mon011/row-decided-by' ($m11Line -ceq 'row decided by: LiveHint' -and $null -ne $m11Decision.Entry -and $m11Decision.Entry.Position -eq 1) 'row decided by: LiveHint at position 1'
+    Write-Output $m11Line
+
     Write-Output ('SelfTest summary: ' + $script:CheckCount + ' checks, ' + $script:FailCount + ' failed')
     if ($script:FailCount -gt 0) { exit 1 }
     exit 0
@@ -374,7 +402,11 @@ try {
     $cmSnaps = New-Object 'System.Collections.Generic.List[object]'
 
     foreach ($target in $plannedMonitors) {
-        $selected = [TerminalOrganizer.Core.Monitors.AppliedEntrySelector]::Select($appliedDoc, $target.ToIdentity(), $desktopText)
+        # SPEC-MON-011: the live-row hint from the FancyZones log decides among the instance-exact rows (the app's path).
+        $logRead = [TerminalOrganizer.Core.Monitors.FancyZonesLogReader]::Read($FancyZonesLogs, $target.MonitorId, $target.Instance)
+        $decision = [TerminalOrganizer.Core.Monitors.AppliedEntrySelector]::Decide($appliedDoc, $target.ToIdentity(), $desktopText, $logRead.Hint)
+        $selected = $decision.Entry
+        Write-Output (Get-DecidedLine $decision)
         if ($null -eq $selected) {
             $note = 'no applied-layouts entry matches monitor #' + $target.Number + '; nothing to plan'
             if ($AllMonitors) { Write-Output ('note: ' + $note); continue }
