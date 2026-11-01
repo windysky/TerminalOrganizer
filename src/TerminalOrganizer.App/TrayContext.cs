@@ -431,7 +431,8 @@ namespace TerminalOrganizer.App
             return new SettingsStore(SettingsStore.DefaultPath(), diagnostics).Load();
         }
 
-        private static int[] ReadTerminalPids()
+        // SPEC-TRAY-013: internal so the attention window probe reuses the same pid discovery.
+        internal static int[] ReadTerminalPids()
         {
             List<int> pids = new List<int>();
             Process[] processes = Process.GetProcessesByName("WindowsTerminal");
@@ -656,6 +657,7 @@ namespace TerminalOrganizer.App
         private readonly NotifyIcon icon;
         private readonly Icon applicationIcon;
         private readonly MarshalledOverflowChoicePrompt choiceAsker;
+        private readonly AttentionController attention;
         private ContextMenuStrip menu;
         private OrganizeRequest activeRequest;
         private bool topologyRerunArmed;
@@ -694,6 +696,18 @@ namespace TerminalOrganizer.App
                 new OperationWork(ExecuteOrganize),
                 new Action<OperationPhase>(CoordinatorPhaseChanged),
                 new Action<OperationCompletion>(OrganizeCompleted));
+            // SPEC-TRAY-013/014: the attention controller (REQ-CTL-001) polls the WSL producer's
+            // signal directory and blinks the overlay; constructed AFTER the log and the
+            // marshalling message window exist (its marshal seam needs the live control). The
+            // SPEC-TRAY-014 options (D-7/D-9, the D-6 extension) arrive from the loaded settings.
+            this.attention = AttentionController.CreateProduction(this.log, this.messageWindow,
+                AttentionSignalDirectory(), current.AttentionOverlay, current.AttentionEventPolicy,
+                current.AttentionStopBlinkLimit, current.AttentionOverlayTopmost);
+            if (!current.AttentionOverlay)
+            {
+                // D-2 default ON; an explicit false in the file starts the controller disabled.
+                this.attention.SetEnabled(false);
+            }
             this.lifecycle = new TrayLifecycle(
                 delegate(int id, int mods, int vk) { return HotkeyNative.RegisterHotKey(messageWindow.Handle, id, mods, vk); },
                 delegate(int id) { return HotkeyNative.UnregisterHotKey(messageWindow.Handle, id); },
@@ -712,6 +726,8 @@ namespace TerminalOrganizer.App
             this.icon.ContextMenuStrip = this.menu;
             this.icon.Visible = true;
             RegisterConfiguredHotkey(current);
+            // SPEC-TRAY-013: the poll and blink timers start once the shell is whole.
+            this.attention.Start();
             this.log.Append("tray shell started (hotkey " + current.Hotkey + ")");
         }
 
@@ -768,7 +784,9 @@ namespace TerminalOrganizer.App
                 current.TitleRules.DefaultRank);
             TrayMenuState state = new TrayMenuState(coordinator.IsBusy, current.Hotkey,
                 ports.Monitors.GetMonitors(), discovered.Snapshots, selector, resolution,
-                this.lastResultText, current.MergeEnabled, current.OverflowPolicy, rowTexts);
+                this.lastResultText, current.MergeEnabled, current.OverflowPolicy, rowTexts,
+                current.AttentionOverlay, current.AttentionEventPolicy,
+                current.AttentionStopBlinkLimit, current.AttentionOverlayTopmost);
             TrayMenuEntry[] entries = TrayMenuBuilder.Build(state);
             ContextMenuStrip built = new ContextMenuStrip();
             foreach (TrayMenuEntry entry in entries)
@@ -851,6 +869,30 @@ namespace TerminalOrganizer.App
                         item.Click += delegate { SelectOverflowPolicy(value); };
                         break;
                     }
+                case TrayMenuEntryKind.AttentionOverlay:
+                    // SPEC-TRAY-013 REQ-UI-001: same UI-thread sole-writer read-modify-write as the
+                    // overflow rows; saves the negated value, flips the controller, rebuilds, never organizes.
+                    item.Click += delegate { ToggleAttentionOverlay(); };
+                    break;
+                case TrayMenuEntryKind.AttentionEnabled:
+                    // SPEC-TRAY-014 D-8: the enable row moved INSIDE the submenu; same behavior.
+                    item.Click += delegate { ToggleAttentionOverlay(); };
+                    break;
+                case TrayMenuEntryKind.AttentionEventPolicy:
+                    {
+                        string current = entry.Value;
+                        item.Click += delegate { SelectAttentionEventPolicy(current); };
+                        break;
+                    }
+                case TrayMenuEntryKind.AttentionStopBlinks:
+                    {
+                        string current = entry.Value;
+                        item.Click += delegate { SelectAttentionStopBlinks(current); };
+                        break;
+                    }
+                case TrayMenuEntryKind.AttentionTopmost:
+                    item.Click += delegate { ToggleAttentionTopmost(); };
+                    break;
                 case TrayMenuEntryKind.OpenLog:
                     item.Click += delegate { OpenLogFile(); };
                     break;
@@ -1224,6 +1266,123 @@ namespace TerminalOrganizer.App
             RebuildMenu();
         }
 
+        /// <summary>SPEC-TRAY-013 toggle (REQ-UI-001): save the negated value, flip the
+        /// controller (stop-or-allow overlays, REQ-CTL-001), rebuild the menu; never organizes.</summary>
+        private void ToggleAttentionOverlay()
+        {
+            bool value = ToggleAttentionOverlayTo(settings);
+            if (this.attention != null)
+            {
+                this.attention.SetEnabled(value);
+            }
+            log.Append(value ? "attention overlay enabled" : "attention overlay disabled");
+            RebuildMenu();
+        }
+
+        /// <summary>SPEC-TRAY-014 D-8: the policy cycle row — save the next token of the pinned
+        /// order, apply to the controller, one log line, rebuild; never organizes.</summary>
+        private void SelectAttentionEventPolicy(string current)
+        {
+            string next = TrayMenuBuilder.NextPolicy(current);
+            SaveAttentionEventPolicyTo(settings, next);
+            if (this.attention != null)
+            {
+                this.attention.SetEventPolicy(next);
+            }
+            log.Append("attention overlay event policy set to " + next);
+            RebuildMenu();
+        }
+
+        /// <summary>SPEC-TRAY-014 D-9: the stop-blinks cycle row — save the next value of the
+        /// pinned order (5/10/20), apply, one log line, rebuild; never organizes.</summary>
+        private void SelectAttentionStopBlinks(string current)
+        {
+            int value;
+            if (!int.TryParse(current, NumberStyles.Integer, CultureInfo.InvariantCulture, out value))
+            {
+                return;
+            }
+            int next = TrayMenuBuilder.NextBlinkLimit(value);
+            SaveAttentionStopBlinksTo(settings, next);
+            if (this.attention != null)
+            {
+                this.attention.SetStopBlinkLimit(next);
+            }
+            log.Append("attention overlay stop blinks set to "
+                + next.ToString(CultureInfo.InvariantCulture));
+            RebuildMenu();
+        }
+
+        /// <summary>SPEC-TRAY-014 (the D-6 extension): the always-on-top row — save the negated
+        /// value, apply to the controller (new creations pick it up; live rings keep their
+        /// mode), one log line, rebuild; never organizes.</summary>
+        private void ToggleAttentionTopmost()
+        {
+            bool value = !settings.Load().AttentionOverlayTopmost;
+            SaveAttentionTopmostTo(settings, value);
+            if (this.attention != null)
+            {
+                this.attention.SetTopmost(value);
+            }
+            log.Append(value ? "attention overlay always on top enabled"
+                : "attention overlay always on top disabled");
+            RebuildMenu();
+        }
+
+        // @MX:NOTE: static toggle save so the round trip is testable (the SaveManagerSelectorTo pattern); carries every other field through.
+        // SPEC-TRAY-014 REQ-SET-002: the toggle and the three option saves each carry ALL FOUR attention values.
+        internal static bool ToggleAttentionOverlayTo(SettingsStore store)
+        {
+            AppSettings current = store.Load();
+            bool value = !current.AttentionOverlay;
+            SaveAttentionBundle(store, current, value, current.AttentionEventPolicy,
+                current.AttentionStopBlinkLimit, current.AttentionOverlayTopmost);
+            return value;
+        }
+
+        /// <summary>SPEC-TRAY-014 D-8: persists the event policy (a cycle token from the submenu).</summary>
+        internal static void SaveAttentionEventPolicyTo(SettingsStore store, string policy)
+        {
+            AppSettings current = store.Load();
+            SaveAttentionBundle(store, current, current.AttentionOverlay,
+                AttentionPolicyResolver.Parse(policy), current.AttentionStopBlinkLimit,
+                current.AttentionOverlayTopmost);
+        }
+
+        /// <summary>SPEC-TRAY-014 D-9: persists the stop blink limit (clamped 1..50 before it reaches here).</summary>
+        internal static void SaveAttentionStopBlinksTo(SettingsStore store, int limit)
+        {
+            AppSettings current = store.Load();
+            SaveAttentionBundle(store, current, current.AttentionOverlay, current.AttentionEventPolicy,
+                SettingsStore.ClampBlinkLimit(limit), current.AttentionOverlayTopmost);
+        }
+
+        /// <summary>SPEC-TRAY-014 (the D-6 extension): persists the always-on-top setting.</summary>
+        internal static void SaveAttentionTopmostTo(SettingsStore store, bool topmost)
+        {
+            AppSettings current = store.Load();
+            SaveAttentionBundle(store, current, current.AttentionOverlay, current.AttentionEventPolicy,
+                current.AttentionStopBlinkLimit, topmost);
+        }
+
+        /// <summary>The one read-modify-write every attention save funnels through (sole writer; all other fields carried).</summary>
+        private static void SaveAttentionBundle(SettingsStore store, AppSettings current,
+            bool enable, string policy, int limit, bool topmost)
+        {
+            store.Save(new AppSettings(current.Hotkey, current.LogPath, current.ManagerWindowName,
+                current.MergeEnabled, current.FirstRunCompleted, current.StartWithWindows,
+                current.ManagerSelector, current.PriorityOverrides, current.SchemaVersion,
+                current.OverflowPolicy, current.CrossMonitorRedistribution, current.TitleRules,
+                enable, policy, limit, topmost));
+        }
+
+        /// <summary>The producer's signal directory (plan.md section J): %LOCALAPPDATA%\wsl-toast\attention.</summary>
+        private static string AttentionSignalDirectory()
+        {
+            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "wsl-toast", "attention");
+        }
+
         /// <summary>
         /// C3 policy persistence (also the remember-choice callback from the worker):
         /// settings and log only — NO UI work, so it is safe on the worker thread (the
@@ -1236,6 +1395,7 @@ namespace TerminalOrganizer.App
         }
 
         // @MX:NOTE: the two tray saves are static so the title-rules block they carry is testable (REQ-SET-002); both keep the block of the settings they read.
+        // SPEC-TRAY-013 (plan.md F row 10) + SPEC-TRAY-014 (REQ-SET-002): both carry ALL FOUR attention values through so no unrelated save reverts one.
         internal static void SaveManagerSelectorTo(SettingsStore store, ManagerSelector selector)
         {
             ManagerSelector value = selector == null ? ManagerSelector.None() : selector;
@@ -1244,7 +1404,8 @@ namespace TerminalOrganizer.App
                 value.IsEmpty ? null : value.RawTitleFallback,
                 current.MergeEnabled, current.FirstRunCompleted, current.StartWithWindows, value,
                 current.PriorityOverrides, current.SchemaVersion, current.OverflowPolicy,
-                current.CrossMonitorRedistribution, current.TitleRules));
+                current.CrossMonitorRedistribution, current.TitleRules, current.AttentionOverlay,
+                current.AttentionEventPolicy, current.AttentionStopBlinkLimit, current.AttentionOverlayTopmost));
         }
 
         internal static void SaveOverflowPolicyTo(SettingsStore store, OverflowPolicy policy)
@@ -1253,7 +1414,8 @@ namespace TerminalOrganizer.App
             store.Save(new AppSettings(current.Hotkey, current.LogPath, current.ManagerWindowName,
                 current.MergeEnabled, current.FirstRunCompleted, current.StartWithWindows,
                 current.ManagerSelector, current.PriorityOverrides, current.SchemaVersion,
-                policy, policy == OverflowPolicy.Redistribute, current.TitleRules));
+                policy, policy == OverflowPolicy.Redistribute, current.TitleRules, current.AttentionOverlay,
+                current.AttentionEventPolicy, current.AttentionStopBlinkLimit, current.AttentionOverlayTopmost));
         }
 
         /// <summary>The menu row value ids (B2 shipped) mapped back to the policy.</summary>
@@ -1380,6 +1542,9 @@ namespace TerminalOrganizer.App
                 // A5: stop accepting requests and cancel any in-flight unit BEFORE the UI
                 // objects go away (the marshalling control dies with messageWindow below).
                 this.coordinator.Dispose();
+                // SPEC-TRAY-013: the controller's own pinned order applies inside (poll
+                // timer, blink timer, in-flight marshals ignored, overlays disposed last).
+                this.attention.Dispose();
                 DisposeIcon();
                 if (this.menu != null)
                 {

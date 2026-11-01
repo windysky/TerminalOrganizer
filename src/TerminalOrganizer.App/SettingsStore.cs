@@ -36,6 +36,10 @@ namespace TerminalOrganizer.App
         private readonly OverflowPolicy overflowPolicy;
         private readonly bool crossMonitorRedistribution;
         private readonly TitleRulesSettings titleRules;
+        private readonly bool attentionOverlay;
+        private readonly string attentionEventPolicy;
+        private readonly int attentionStopBlinkLimit;
+        private readonly bool attentionOverlayTopmost;
 
         public AppSettings(string hotkey, string logPath, string managerWindowName)
             : this(hotkey, logPath, managerWindowName, false)
@@ -102,6 +106,40 @@ namespace TerminalOrganizer.App
             bool firstRunCompleted, bool startWithWindows, ManagerSelector managerSelector,
             PriorityOverride[] priorityOverrides, int schemaVersion, OverflowPolicy overflowPolicy,
             bool crossMonitorRedistribution, TitleRulesSettings titleRules)
+            : this(hotkey, logPath, managerWindowName, mergeEnabled, firstRunCompleted, startWithWindows,
+                managerSelector, priorityOverrides, schemaVersion, overflowPolicy, crossMonitorRedistribution,
+                titleRules, true)
+        {
+        }
+
+        /// <summary>
+        /// SPEC-TRAY-013 form (REQ-SET-001): also carries the attention-overlay flag.
+        /// The legacy constructors default it to TRUE (D-2: default ON, absent = true);
+        /// only an explicit boolean false in the file loads as false. The SPEC-TRAY-014
+        /// options default to mixed / 10 / false (D-7/D-9 and the D-6 extension).
+        /// </summary>
+        public AppSettings(string hotkey, string logPath, string managerWindowName, bool mergeEnabled,
+            bool firstRunCompleted, bool startWithWindows, ManagerSelector managerSelector,
+            PriorityOverride[] priorityOverrides, int schemaVersion, OverflowPolicy overflowPolicy,
+            bool crossMonitorRedistribution, TitleRulesSettings titleRules, bool attentionOverlay)
+            : this(hotkey, logPath, managerWindowName, mergeEnabled, firstRunCompleted, startWithWindows,
+                managerSelector, priorityOverrides, schemaVersion, overflowPolicy, crossMonitorRedistribution,
+                titleRules, attentionOverlay, AttentionPolicyResolver.DefaultPolicy,
+                SettingsStore.DefaultStopBlinkLimit, false)
+        {
+        }
+
+        /// <summary>
+        /// SPEC-TRAY-014 form (REQ-SET-001): also carries the three attention options —
+        /// the event policy (mixed|all|notifications), the stop blink limit (already
+        /// clamped 1..50 by the loader) and the always-on-top setting (default false =
+        /// the shipped above-target z-order).
+        /// </summary>
+        public AppSettings(string hotkey, string logPath, string managerWindowName, bool mergeEnabled,
+            bool firstRunCompleted, bool startWithWindows, ManagerSelector managerSelector,
+            PriorityOverride[] priorityOverrides, int schemaVersion, OverflowPolicy overflowPolicy,
+            bool crossMonitorRedistribution, TitleRulesSettings titleRules, bool attentionOverlay,
+            string attentionEventPolicy, int attentionStopBlinkLimit, bool attentionOverlayTopmost)
         {
             this.titleRules = titleRules;
             this.MergeEnabled = mergeEnabled;
@@ -115,6 +153,11 @@ namespace TerminalOrganizer.App
             this.schemaVersion = schemaVersion > 0 ? schemaVersion : DefaultSchemaVersion;
             this.overflowPolicy = overflowPolicy;
             this.crossMonitorRedistribution = crossMonitorRedistribution;
+            this.attentionOverlay = attentionOverlay;
+            this.attentionEventPolicy = attentionEventPolicy == null
+                ? AttentionPolicyResolver.DefaultPolicy : attentionEventPolicy;
+            this.attentionStopBlinkLimit = attentionStopBlinkLimit;
+            this.attentionOverlayTopmost = attentionOverlayTopmost;
         }
 
         public string Hotkey { get { return hotkey; } }
@@ -150,6 +193,22 @@ namespace TerminalOrganizer.App
 
         /// <summary>True when this value was built with a title-rules value (Load and the 12-argument constructor do).</summary>
         public bool HasTitleRules { get { return titleRules != null; } }
+
+        /// <summary>
+        /// The SPEC-TRAY-013 attention-overlay flag (REQ-SET-001): true when the file carries
+        /// no key or a null, true for boolean true, false only for boolean false. Default ON
+        /// (D-2); every legacy constructor and the defaults pass true.
+        /// </summary>
+        public bool AttentionOverlay { get { return attentionOverlay; } }
+
+        /// <summary>The SPEC-TRAY-014 event policy (mixed|all|notifications); legacy constructors default mixed (D-7).</summary>
+        public string AttentionEventPolicy { get { return attentionEventPolicy; } }
+
+        /// <summary>The SPEC-TRAY-014 stop blink limit, clamped 1..50 at load; legacy constructors default 10 (D-9).</summary>
+        public int AttentionStopBlinkLimit { get { return attentionStopBlinkLimit; } }
+
+        /// <summary>The SPEC-TRAY-014 always-on-top setting; default false = the shipped above-target z-order (the D-6 extension).</summary>
+        public bool AttentionOverlayTopmost { get { return attentionOverlayTopmost; } }
 
         /// <summary>The title-rules value; never null (a value built without one behaves as preset none).</summary>
         public TitleRulesSettings TitleRules
@@ -417,6 +476,32 @@ namespace TerminalOrganizer.App
     }
 
     /// <summary>
+    /// The SPEC-TRAY-014 event-policy resolver (plan.md A-2: it lives beside the DTO it
+    /// serves): the closed token set mixed|all|notifications (ordinal); a null, empty or
+    /// unknown value loads as the default "mixed" — a PER-KEY degrade, never a whole-file
+    /// degradation (REQ-SET-001, the OverflowPolicyParser precedent).
+    /// </summary>
+    // @MX:NOTE: closed token set + the mixed default (D-7); changing a token is a SPEC amendment.
+    public static class AttentionPolicyResolver
+    {
+        public const string PolicyMixed = "mixed";
+        public const string PolicyAll = "all";
+        public const string PolicyNotifications = "notifications";
+        public const string DefaultPolicy = PolicyMixed;
+
+        public static string Parse(string text)
+        {
+            if (string.Equals(text, PolicyMixed, StringComparison.Ordinal)
+                || string.Equals(text, PolicyAll, StringComparison.Ordinal)
+                || string.Equals(text, PolicyNotifications, StringComparison.Ordinal))
+            {
+                return text;
+            }
+            return DefaultPolicy;
+        }
+    }
+
+    /// <summary>
     /// Loads and saves the single settings file (REQ-SET-001, spec D-3):
     /// %LOCALAPPDATA%\TerminalOrganizer\settings.json holding hotkey / logPath /
     /// managerWindowName as one JSON shape. Sole-writer rule: ALL persistence goes through
@@ -430,6 +515,27 @@ namespace TerminalOrganizer.App
     {
         /// <summary>The D-3 default hotkey string.</summary>
         public const string DefaultHotkey = "Ctrl+Alt+O";
+
+        /// <summary>SPEC-TRAY-014 D-9: the absent-key stop blink limit (clamped 1..50 on load).</summary>
+        public const int DefaultStopBlinkLimit = 10;
+
+        /// <summary>
+        /// SPEC-TRAY-014 D-9 (plan.md A-2, pure): clamps any integer into 1..50 —
+        /// 0 and negatives load 1, anything above 50 loads 50.
+        /// </summary>
+        // @MX:NOTE: the 1..50 clamp bounds (D-9); changing a bound is a SPEC amendment.
+        public static int ClampBlinkLimit(int value)
+        {
+            if (value < 1)
+            {
+                return 1;
+            }
+            if (value > 50)
+            {
+                return 50;
+            }
+            return value;
+        }
 
         private readonly string path;
         private readonly Action<string> log;
@@ -508,7 +614,13 @@ namespace TerminalOrganizer.App
                 return new AppSettings(hotkey, logPath, manager, dto.mergeEnabled,
                     dto.firstRunCompleted, dto.startWithWindows, ParseSelector(dto.managerSelector),
                     ParseOverrides(dto.priorityOverrides), legacy ? AppSettings.DefaultSchemaVersion : dto.schemaVersion, policy,
-                    policy == OverflowPolicy.Redistribute && dto.crossMonitorRedistribution, rules);
+                    policy == OverflowPolicy.Redistribute && dto.crossMonitorRedistribution, rules,
+                    dto.attentionOverlay != false,
+                    AttentionPolicyResolver.Parse(dto.attentionEventPolicy),
+                    dto.attentionStopBlinkLimit.HasValue
+                        ? ClampBlinkLimit(dto.attentionStopBlinkLimit.Value)
+                        : DefaultStopBlinkLimit,
+                    dto.attentionOverlayTopmost == true);
             }
             catch (Exception ex)
             {
@@ -544,6 +656,12 @@ namespace TerminalOrganizer.App
                 dto.schemaVersion = values.SchemaVersion;
                 dto.overflowPolicy = OverflowPolicyParser.Format(values.OverflowPolicy);
                 dto.crossMonitorRedistribution = values.CrossMonitorRedistribution;
+                // @MX:NOTE: SPEC-TRAY-013 REQ-SET-001 — every save writes the resolved boolean (absent key loads as true).
+                dto.attentionOverlay = values.AttentionOverlay;
+                // @MX:NOTE: SPEC-TRAY-014 REQ-SET-002 — every save also writes the three resolved option values.
+                dto.attentionEventPolicy = values.AttentionEventPolicy;
+                dto.attentionStopBlinkLimit = values.AttentionStopBlinkLimit;
+                dto.attentionOverlayTopmost = values.AttentionOverlayTopmost;
                 // @MX:NOTE: generic-form parse; block kept verbatim, invalid parts included; fallback block on save.
                 // A value without a title-rules value (an older constructor) writes what loading the current file yields.
                 TitleRulesSettings block = values.HasTitleRules ? values.TitleRules : LoadCore(false).TitleRules;
@@ -710,6 +828,18 @@ namespace TerminalOrganizer.App
             public int schemaVersion;
             public string overflowPolicy;
             public bool crossMonitorRedistribution;
+
+            /// <summary>The SPEC-TRAY-013 attention-overlay flag; null (absent key) loads as true (REQ-SET-001).</summary>
+            public bool? attentionOverlay;
+
+            /// <summary>SPEC-TRAY-014: the event policy token; null/absent/unknown loads as mixed (per-key degrade).</summary>
+            public string attentionEventPolicy;
+
+            /// <summary>SPEC-TRAY-014: the stop blink limit; absent loads 10, any integer clamps 1..50; a non-integer takes the whole-file tolerant degradation.</summary>
+            public int? attentionStopBlinkLimit;
+
+            /// <summary>SPEC-TRAY-014: the always-on-top setting; null/absent loads false.</summary>
+            public bool? attentionOverlayTopmost;
 
             /// <summary>The title-rules block in generic form (never a typed shape): a bad value inside it cannot degrade the file.</summary>
             public object titleRules;

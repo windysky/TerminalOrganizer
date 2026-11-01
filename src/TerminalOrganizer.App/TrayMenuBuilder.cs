@@ -25,6 +25,24 @@ namespace TerminalOrganizer.App
         SetManager,
         OverflowRoot,
         OverflowPolicy,
+
+        /// <summary>SPEC-TRAY-013: the root-level checkable attention-overlay toggle row.</summary>
+        AttentionOverlay,
+
+        /// <summary>SPEC-TRAY-014 D-8: the "Attention overlay" options submenu root.</summary>
+        AttentionRoot,
+
+        /// <summary>SPEC-TRAY-014 D-8: the enable toggle, first child of the submenu.</summary>
+        AttentionEnabled,
+
+        /// <summary>SPEC-TRAY-014 D-8: the event-policy cycle row.</summary>
+        AttentionEventPolicy,
+
+        /// <summary>SPEC-TRAY-014 D-8: the stop-blink cycle row.</summary>
+        AttentionStopBlinks,
+
+        /// <summary>SPEC-TRAY-014 D-8: the always-on-top checkable row.</summary>
+        AttentionTopmost,
         LabelsAndPrioritiesRoot,
         LabelWindow,
         LastResult,
@@ -157,6 +175,11 @@ namespace TerminalOrganizer.App
         private readonly string lastResultText;
         private readonly bool mergeMenuEnabled;
         private readonly OverflowPolicy overflowPolicy;
+        private readonly bool? attentionOverlay;
+        private readonly bool hasAttentionOptions;
+        private readonly string attentionEventPolicy;
+        private readonly int attentionStopBlinkLimit;
+        private readonly bool attentionOverlayTopmost;
         private readonly Dictionary<long, string> rowTexts;
 
         public TrayMenuState(bool busy, string hotkeyDisplay, MonitorInfo[] monitors, WindowSnapshot[] windows,
@@ -167,23 +190,71 @@ namespace TerminalOrganizer.App
         }
 
         /// <summary>C3 form: also carries the persisted overflow policy driving the
-        /// policy rows' checked state. The legacy constructor defaults to Ask.</summary>
+        /// policy rows' checked state. The legacy constructor defaults to Ask and keeps the
+        /// pre-attention root order (attention-era-unaware, like the 8-argument form).</summary>
         public TrayMenuState(bool busy, string hotkeyDisplay, MonitorInfo[] monitors, WindowSnapshot[] windows,
             ManagerSelector managerSelector, ManagerResolution managerResolution, string lastResultText,
             bool mergeMenuEnabled, OverflowPolicy overflowPolicy)
             : this(busy, hotkeyDisplay, monitors, windows, managerSelector, managerResolution,
-                lastResultText, mergeMenuEnabled, overflowPolicy, null)
+                lastResultText, mergeMenuEnabled, overflowPolicy, null, (bool?)null)
         {
         }
 
         /// <summary>
         /// SPEC-RULES-009 form: also carries one priority row text per window, parallel to the windows array
         /// (RuleProvenance.RowTexts). With row texts, "Labels and priorities" lists every window; without them
-        /// (the older constructors) it keeps listing only unidentified windows.
+        /// (the older constructors) it keeps listing only unidentified windows. States built here are
+        /// attention-era: the toggle row renders checked (D-2 default ON).
         /// </summary>
         public TrayMenuState(bool busy, string hotkeyDisplay, MonitorInfo[] monitors, WindowSnapshot[] windows,
             ManagerSelector managerSelector, ManagerResolution managerResolution, string lastResultText,
             bool mergeMenuEnabled, OverflowPolicy overflowPolicy, string[] windowRowTexts)
+            : this(busy, hotkeyDisplay, monitors, windows, managerSelector, managerResolution,
+                lastResultText, mergeMenuEnabled, overflowPolicy, windowRowTexts, true)
+        {
+        }
+
+        /// <summary>
+        /// SPEC-TRAY-013 form: also carries the attention-overlay flag driving the toggle
+        /// row's checked state (REQ-UI-001). The 10-argument constructor defaults the flag
+        /// to true (D-2: default ON); the pre-SPEC-RULES-009 constructors keep the
+        /// pre-attention root order (the same constructor-era scoping the row-texts
+        /// overload uses, so every pinned legacy suite passes unedited). States built here
+        /// render the FLAT toggle row (no options submenu).
+        /// </summary>
+        public TrayMenuState(bool busy, string hotkeyDisplay, MonitorInfo[] monitors, WindowSnapshot[] windows,
+            ManagerSelector managerSelector, ManagerResolution managerResolution, string lastResultText,
+            bool mergeMenuEnabled, OverflowPolicy overflowPolicy, string[] windowRowTexts,
+            bool attentionOverlay)
+            : this(busy, hotkeyDisplay, monitors, windows, managerSelector, managerResolution,
+                lastResultText, mergeMenuEnabled, overflowPolicy, windowRowTexts, (bool?)attentionOverlay)
+        {
+        }
+
+        /// <summary>
+        /// SPEC-TRAY-014 options form (D-8): carries the full attention options bundle
+        /// (enable, event policy, stop blink limit, always-on-top) and renders the
+        /// "Attention overlay" submenu instead of the SPEC-TRAY-013-era flat row.
+        /// </summary>
+        public TrayMenuState(bool busy, string hotkeyDisplay, MonitorInfo[] monitors, WindowSnapshot[] windows,
+            ManagerSelector managerSelector, ManagerResolution managerResolution, string lastResultText,
+            bool mergeMenuEnabled, OverflowPolicy overflowPolicy, string[] windowRowTexts,
+            bool attentionOverlay, string attentionEventPolicy, int attentionStopBlinkLimit,
+            bool attentionOverlayTopmost)
+            : this(busy, hotkeyDisplay, monitors, windows, managerSelector, managerResolution,
+                lastResultText, mergeMenuEnabled, overflowPolicy, windowRowTexts, (bool?)attentionOverlay)
+        {
+            this.hasAttentionOptions = true;
+            this.attentionEventPolicy = attentionEventPolicy == null
+                ? AttentionPolicyResolver.DefaultPolicy : attentionEventPolicy;
+            this.attentionStopBlinkLimit = attentionStopBlinkLimit;
+            this.attentionOverlayTopmost = attentionOverlayTopmost;
+        }
+
+        private TrayMenuState(bool busy, string hotkeyDisplay, MonitorInfo[] monitors, WindowSnapshot[] windows,
+            ManagerSelector managerSelector, ManagerResolution managerResolution, string lastResultText,
+            bool mergeMenuEnabled, OverflowPolicy overflowPolicy, string[] windowRowTexts,
+            bool? attentionOverlay)
         {
             if (windowRowTexts != null)
             {
@@ -206,6 +277,7 @@ namespace TerminalOrganizer.App
             this.lastResultText = lastResultText;
             this.mergeMenuEnabled = mergeMenuEnabled;
             this.overflowPolicy = overflowPolicy;
+            this.attentionOverlay = attentionOverlay;
         }
 
         public bool Busy { get { return busy; } }
@@ -219,6 +291,30 @@ namespace TerminalOrganizer.App
 
         /// <summary>The persisted overflow policy (C3); Ask on the legacy constructor.</summary>
         public OverflowPolicy OverflowPolicy { get { return overflowPolicy; } }
+
+        /// <summary>True when this state is attention-era (the SPEC-RULES-009 or SPEC-TRAY-013 constructors) and the toggle row renders.</summary>
+        public bool HasAttentionOverlay { get { return attentionOverlay.HasValue; } }
+
+        /// <summary>The SPEC-TRAY-013 attention-overlay setting driving the toggle row's checked state; absent reads as true (D-2 default ON).</summary>
+        public bool AttentionOverlay { get { return attentionOverlay ?? true; } }
+
+        /// <summary>True when this state carries the SPEC-TRAY-014 options bundle and the submenu renders instead of the flat row.</summary>
+        public bool HasAttentionOptions { get { return hasAttentionOptions; } }
+
+        /// <summary>The SPEC-TRAY-014 event policy; mixed outside the options era.</summary>
+        public string AttentionEventPolicy
+        {
+            get { return attentionEventPolicy ?? AttentionPolicyResolver.DefaultPolicy; }
+        }
+
+        /// <summary>The SPEC-TRAY-014 stop blink limit as loaded (clamped 1..50); 10 outside the options era.</summary>
+        public int AttentionStopBlinkLimit
+        {
+            get { return attentionStopBlinkLimit; }
+        }
+
+        /// <summary>The SPEC-TRAY-014 always-on-top setting; false outside the options era.</summary>
+        public bool AttentionOverlayTopmost { get { return attentionOverlayTopmost; } }
 
         /// <summary>True when the state carries priority row texts (the SPEC-RULES-009 constructor).</summary>
         public bool HasRowTexts { get { return rowTexts != null; } }
@@ -285,6 +381,25 @@ namespace TerminalOrganizer.App
             entries.Add(new TrayMenuEntry(TrayMenuEntryKind.OverflowRoot, "Overflow behavior", !busy, false, null, null, null,
                 BuildOverflowChildren(state.OverflowPolicy)));
             entries.Add(Separator());
+            // SPEC-TRAY-013 REQ-UI-001 / SPEC-TRAY-014 D-8: the attention surface sits
+            // between the Overflow root and the Labels-and-priorities root, enabled
+            // regardless of busy (a display preference: same UI-thread sole-writer
+            // read-modify-write as the overflow rows, mutates no organize state). Era
+            // scoping: the options bundle renders the submenu; the SPEC-TRAY-013-era
+            // constructor keeps the flat checkable row; pre-attention constructors keep
+            // the pre-attention root order (every pinned legacy suite passes unedited).
+            if (state.HasAttentionOptions)
+            {
+                entries.Add(new TrayMenuEntry(TrayMenuEntryKind.AttentionRoot, "Attention overlay",
+                    true, false, null, null, null, BuildAttentionChildren(state)));
+                entries.Add(Separator());
+            }
+            else if (state.HasAttentionOverlay)
+            {
+                entries.Add(new TrayMenuEntry(TrayMenuEntryKind.AttentionOverlay, "Attention overlay",
+                    true, state.AttentionOverlay, null, null, null, null));
+                entries.Add(Separator());
+            }
             TrayMenuEntry[] labelRows = BuildLabelChildren(snapshots, state);
             entries.Add(new TrayMenuEntry(TrayMenuEntryKind.LabelsAndPrioritiesRoot, "Labels and priorities",
                 labelRows.Length > 0 && !busy, false, null, null, null, labelRows));
@@ -528,6 +643,80 @@ namespace TerminalOrganizer.App
             if (first >= 'M' && first <= 'R') return 2;
             if (first >= 'S' && first <= 'Z') return 3;
             return 4;
+        }
+
+        /// <summary>
+        /// The SPEC-TRAY-014 pure policy cycle (plan.md A-8, D-8): Mixed -> All ->
+        /// Notifications only -> Mixed; any other value (including null) enters the
+        /// pinned order at its start. Deterministic; never throws.
+        /// </summary>
+        // @MX:NOTE: the pinned cycle order; changing it is a SPEC amendment.
+        public static string NextPolicy(string current)
+        {
+            if (string.Equals(current, AttentionPolicyResolver.PolicyMixed, StringComparison.Ordinal))
+            {
+                return AttentionPolicyResolver.PolicyAll;
+            }
+            if (string.Equals(current, AttentionPolicyResolver.PolicyAll, StringComparison.Ordinal))
+            {
+                return AttentionPolicyResolver.PolicyNotifications;
+            }
+            return AttentionPolicyResolver.PolicyMixed;
+        }
+
+        /// <summary>
+        /// The SPEC-TRAY-014 pure blink-limit cycle (plan.md A-8, D-9): 5 -> 10 -> 20 -> 5;
+        /// a non-cycle value (any integer from the file, e.g. 7) enters the order at its
+        /// start. Deterministic.
+        /// </summary>
+        // @MX:NOTE: the pinned cycle order; changing it is a SPEC amendment.
+        public static int NextBlinkLimit(int current)
+        {
+            if (current == 5)
+            {
+                return 10;
+            }
+            if (current == 10)
+            {
+                return 20;
+            }
+            return 5;
+        }
+
+        /// <summary>The submenu's four children (D-8): Enabled, Event policy, Stop blinks, Always on top.</summary>
+        private static TrayMenuEntry[] BuildAttentionChildren(TrayMenuState state)
+        {
+            return new TrayMenuEntry[]
+            {
+                new TrayMenuEntry(TrayMenuEntryKind.AttentionEnabled, "Enabled",
+                    true, state.AttentionOverlay, null, null, null, null),
+                new TrayMenuEntry(TrayMenuEntryKind.AttentionEventPolicy,
+                    "Event policy: " + PolicyDisplayName(state.AttentionEventPolicy),
+                    true, false, null, null, state.AttentionEventPolicy, null),
+                new TrayMenuEntry(TrayMenuEntryKind.AttentionStopBlinks,
+                    "Stop blinks: " + state.AttentionStopBlinkLimit.ToString(CultureInfo.InvariantCulture),
+                    true, false, null, null, state.AttentionStopBlinkLimit.ToString(CultureInfo.InvariantCulture), null),
+                new TrayMenuEntry(TrayMenuEntryKind.AttentionTopmost, "Always on top",
+                    true, state.AttentionOverlayTopmost, null, null, null, null)
+            };
+        }
+
+        /// <summary>The display name of one policy token (the raw token as the fallback).</summary>
+        private static string PolicyDisplayName(string policy)
+        {
+            if (string.Equals(policy, AttentionPolicyResolver.PolicyMixed, StringComparison.Ordinal))
+            {
+                return "Mixed";
+            }
+            if (string.Equals(policy, AttentionPolicyResolver.PolicyAll, StringComparison.Ordinal))
+            {
+                return "All";
+            }
+            if (string.Equals(policy, AttentionPolicyResolver.PolicyNotifications, StringComparison.Ordinal))
+            {
+                return "Notifications only";
+            }
+            return policy == null ? string.Empty : policy;
         }
 
         private static TrayMenuEntry[] BuildOverflowChildren(OverflowPolicy policy)

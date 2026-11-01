@@ -46,6 +46,7 @@ Right-click the tray icon:
 | **Organize a specific monitor** | Submenu lists your monitors with physical labels like `Left — 1920×1080` or `Right (Primary)` |
 | **Manager** | Pin one window as the *manager* — it is protected and exempt from stacking. **Show** flashes it so you can find it; **Clear** unpins it |
 | **Overflow behavior policy** | Choose what happens when windows don't all fit (see below) |
+| **Attention overlay** | Submenu controlling the attention overlay (see below): Enabled, Event policy, Stop blinks, Always on top; every choice is saved to settings |
 | **Labels and priorities** | Set labels by hand and see every window's rank and where it came from; ranks set by hand live in `priorityOverrides` in settings |
 | **Last result** | Exact counts from the most recent organize |
 | **Open log** / **Exit** | Open the log file / quit the app |
@@ -132,6 +133,27 @@ powershell -File tools\merge-test.ps1 -AttachOnly -TargetHwnd <h> -CommandLine "
 
 The first is the close drill (expects outcome `Merged`; the source closes only after identity inspection and the close-gate pass). The second is attach-only (launches and confirms the tab on the target window; the source path is never entered and nothing closes; expects outcome `Attached`).
 
+### Attention overlay
+
+When a Claude Code session running on the WSL side wants you to look at a terminal, it drops a signal file that names what to look for. The tray app then draws a blinking amber border over **every** Windows Terminal window whose title or tab titles match that signal — including matches hidden in inactive tabs, which are found through UI Automation. The border keeps blinking until you focus the window (or close / minimize it); there is no time limit, and the app never steals focus or brings the window to the foreground.
+
+The overlay is on by default, and everything about it lives in the **Attention overlay** tray submenu — every choice is saved to `%LOCALAPPDATA%\TerminalOrganizer\settings.json` (settings stay at schemaVersion 3):
+
+| Submenu item | Choices | Settings key |
+| --- | --- | --- |
+| **Enabled** | on / off — the overlay itself | `attentionOverlay` (default on) |
+| **Event policy** | **Mixed** (default) / **All** / **Notifications only** | `attentionEventPolicy` (default `mixed`) |
+| **Stop blinks** | 5 / **10** (default) / 20 | `attentionStopBlinkLimit` (default `10`) |
+| **Always on top** | on / off (default off) | `attentionOverlayTopmost` (default off) |
+
+Under **Event policy**, signals come in two kinds: *notification* events (a session wants you to look) and *stop* events (a session reports it is done waiting). **Mixed** blinks notifications until the window is focused — no time limit — while stop events blink a fixed count and then stop on their own. **All** treats both kinds as notifications (blink until focused); **Notifications only** ignores stop events entirely.
+
+**Stop blinks** sets that fixed count for stop events. One blink is a single visible flash, so the default of 10 lasts about 5 seconds.
+
+**Always on top** is off by default: the border sits at the terminal's own level, so a window covering the terminal covers the border too. Turn it on to keep the border above other windows.
+
+Nothing appears unless the WSL-side producer (wsl-toast) is installed and signaling.
+
 ## Safety design
 
 TerminalOrganizer moves your windows around, so it is built to be conservative about it:
@@ -154,6 +176,7 @@ Optional power-user scripts (PowerShell) in the `tools\` folder:
 | `tools\organize-dryrun.ps1 -Monitor N` | Preview the placement plan — moves nothing; prints a `row decided by:` line (`-FancyZonesLogs <path>` overrides the log folder) |
 | `tools\organize-once.ps1` | One headless organize run |
 | `tools\merge-test.ps1` | Supervised session-merge drill (see above) |
+| `tools\install-start-menu-shortcut.ps1` | Add a **TerminalOrganizer** entry to the Start menu that opens this folder's `bin\TerminalOrganizer.App.exe`, then start the app; `-Startup` also starts it at logon, `-NoStart` only writes the shortcut |
 
 ## FAQ
 
