@@ -49,7 +49,10 @@ Right-click the tray icon:
 | **Attention overlay** | Submenu controlling the attention overlay (see below): Enabled, Event policy, Stop blinks, Always on top; every choice is saved to settings |
 | **Labels and priorities** | Set labels by hand and see every window's rank and where it came from; ranks set by hand live in `priorityOverrides` in settings |
 | **Last result** | Exact counts from the most recent organize |
+| **Settings…** | Open the settings window (see below) |
 | **Open log** / **Exit** | Open the log file / quit the app |
+
+Settings-type rows — the attention overlay options, the overflow policy choices, and picking or clearing the manager window — keep the menu open and update in place when you change them; other rows (organize, open log, exit) close it as before.
 
 ### Title rules: where each window's rank comes from
 
@@ -137,6 +140,10 @@ The first is the close drill (expects outcome `Merged`; the source closes only a
 
 When a Claude Code session running on the WSL side wants you to look at a terminal, it drops a signal file that names what to look for. The tray app then draws a blinking amber border over **every** Windows Terminal window whose title or tab titles match that signal — including matches hidden in inactive tabs, which are found through UI Automation. The border keeps blinking until you focus the window (or close / minimize it); there is no time limit, and the app never steals focus or brings the window to the foreground.
 
+While the tray app runs it also refreshes a heartbeat file (`organizer.json` in the same attention directory) every 5 seconds. A wsl-toast producer v1.5 or newer reads that heartbeat and, while it is fresh, skips its own OS toast and taskbar flash — the signal still arrives, and the overlay becomes the notification. If the organizer is not running (or stalls), the heartbeat goes stale and the producer falls back to toast and flash within about 15 seconds.
+
+A signal that carries a `message` (the first paragraph of the reply, at most 600 characters) renders it in a solid near-black card beside the ringing window: the text is selectable and copyable, the card's close glyph dismisses only the card (the ring keeps blinking), and clicking the card never counts as focusing the window.
+
 The overlay is on by default, and everything about it lives in the **Attention overlay** tray submenu — every choice is saved to `%LOCALAPPDATA%\TerminalOrganizer\settings.json` (settings stay at schemaVersion 3):
 
 | Submenu item | Choices | Settings key |
@@ -145,14 +152,23 @@ The overlay is on by default, and everything about it lives in the **Attention o
 | **Event policy** | **Mixed** (default) / **All** / **Notifications only** | `attentionEventPolicy` (default `mixed`) |
 | **Stop blinks** | 5 / **10** (default) / 20 | `attentionStopBlinkLimit` (default `10`) |
 | **Always on top** | on / off (default off) | `attentionOverlayTopmost` (default off) |
+| **Info visible seconds** | no menu row — edit `settings.json` | `attentionInfoVisibleSeconds` (default `10`, clamped 1..120) |
+
+**Event policy** and **Stop blinks** are radio submenus: each lists its values with the current one checked, and picking a row saves that value directly (a hand-edited out-of-set value in `settings.json` leaves every choice unchecked until you pick one, which then saves normally).
 
 Under **Event policy**, signals come in two kinds: *notification* events (a session wants you to look) and *stop* events (a session reports it is done waiting). **Mixed** blinks notifications until the window is focused — no time limit — while stop events blink a fixed count and then stop on their own. **All** treats both kinds as notifications (blink until focused); **Notifications only** ignores stop events entirely.
 
 **Stop blinks** sets that fixed count for stop events. One blink is a single visible flash, so the default of 10 lasts about 5 seconds.
 
+Besides the event axis, a signal may carry a `kind`: *ask* blinks until the window is focused (the usual behavior), *info* blinks for `attentionInfoVisibleSeconds` seconds — counted only while the window's virtual desktop is the current one, so switching away pauses the countdown — and then stops on its own, and *stop* keeps its fixed blink count. A signal without `kind`, or with a value the app does not recognize, keeps today's behavior exactly. The producer has not started sending `kind` yet; until it does, nothing changes.
+
 **Always on top** is off by default: the border sits at the terminal's own level, so a window covering the terminal covers the border too. Turn it on to keep the border above other windows.
 
 Nothing appears unless the WSL-side producer (wsl-toast) is installed and signaling.
+
+### The settings window
+
+**Settings…** in the tray menu opens a small window with everything the menu's settings rows control: the attention overlay options, the overflow policy, and the manager window (picked from the same candidate list, with *(none)* to clear). Every change saves immediately through the same paths the tray menu uses — there is no OK button and no new settings key — and the tray menu reflects the new values the next time you open it after closing the window. Re-selecting **Settings…** while the window is open just focuses it, and closing the window does not exit the app.
 
 ## Safety design
 

@@ -40,6 +40,7 @@ namespace TerminalOrganizer.App
         private readonly string attentionEventPolicy;
         private readonly int attentionStopBlinkLimit;
         private readonly bool attentionOverlayTopmost;
+        private readonly int attentionInfoVisibleSeconds;
 
         public AppSettings(string hotkey, string logPath, string managerWindowName)
             : this(hotkey, logPath, managerWindowName, false)
@@ -133,13 +134,33 @@ namespace TerminalOrganizer.App
         /// SPEC-TRAY-014 form (REQ-SET-001): also carries the three attention options —
         /// the event policy (mixed|all|notifications), the stop blink limit (already
         /// clamped 1..50 by the loader) and the always-on-top setting (default false =
-        /// the shipped above-target z-order).
+        /// the shipped above-target z-order). SPEC-TRAY-016: the fifth attention value
+        /// (the info visible-seconds cap) defaults to 10 s through the full-tail form.
         /// </summary>
         public AppSettings(string hotkey, string logPath, string managerWindowName, bool mergeEnabled,
             bool firstRunCompleted, bool startWithWindows, ManagerSelector managerSelector,
             PriorityOverride[] priorityOverrides, int schemaVersion, OverflowPolicy overflowPolicy,
             bool crossMonitorRedistribution, TitleRulesSettings titleRules, bool attentionOverlay,
             string attentionEventPolicy, int attentionStopBlinkLimit, bool attentionOverlayTopmost)
+            : this(hotkey, logPath, managerWindowName, mergeEnabled, firstRunCompleted, startWithWindows,
+                managerSelector, priorityOverrides, schemaVersion, overflowPolicy, crossMonitorRedistribution,
+                titleRules, attentionOverlay, attentionEventPolicy, attentionStopBlinkLimit,
+                attentionOverlayTopmost, SettingsStore.DefaultInfoVisibleSeconds)
+        {
+        }
+
+        /// <summary>
+        /// SPEC-TRAY-016 full-tail form (REQ-PREF-001): also carries the FIFTH attention
+        /// value — the info visible-seconds cap (already clamped 1..120 by the loader).
+        /// Every mid-chain constructor and FirstRunDialog's form inherit the 10 s default
+        /// by construction, so no new store.Save site appears (the count stays 6).
+        /// </summary>
+        public AppSettings(string hotkey, string logPath, string managerWindowName, bool mergeEnabled,
+            bool firstRunCompleted, bool startWithWindows, ManagerSelector managerSelector,
+            PriorityOverride[] priorityOverrides, int schemaVersion, OverflowPolicy overflowPolicy,
+            bool crossMonitorRedistribution, TitleRulesSettings titleRules, bool attentionOverlay,
+            string attentionEventPolicy, int attentionStopBlinkLimit, bool attentionOverlayTopmost,
+            int attentionInfoVisibleSeconds)
         {
             this.titleRules = titleRules;
             this.MergeEnabled = mergeEnabled;
@@ -158,6 +179,7 @@ namespace TerminalOrganizer.App
                 ? AttentionPolicyResolver.DefaultPolicy : attentionEventPolicy;
             this.attentionStopBlinkLimit = attentionStopBlinkLimit;
             this.attentionOverlayTopmost = attentionOverlayTopmost;
+            this.attentionInfoVisibleSeconds = attentionInfoVisibleSeconds;
         }
 
         public string Hotkey { get { return hotkey; } }
@@ -209,6 +231,11 @@ namespace TerminalOrganizer.App
 
         /// <summary>The SPEC-TRAY-014 always-on-top setting; default false = the shipped above-target z-order (the D-6 extension).</summary>
         public bool AttentionOverlayTopmost { get { return attentionOverlayTopmost; } }
+
+        /// <summary>The SPEC-TRAY-016 info visible-seconds cap (REQ-PREF-001), clamped 1..120 at
+        /// load; absent-key and every constructor default is 10 seconds (D-9) — a SECONDS axis,
+        /// never the tick-unit AttentionStopBlinkLimit.</summary>
+        public int AttentionInfoVisibleSeconds { get { return attentionInfoVisibleSeconds; } }
 
         /// <summary>The title-rules value; never null (a value built without one behaves as preset none).</summary>
         public TitleRulesSettings TitleRules
@@ -537,6 +564,29 @@ namespace TerminalOrganizer.App
             return value;
         }
 
+        /// <summary>SPEC-TRAY-016 (REQ-PREF-001, plan.md section J): the absent-key info
+        /// visible-seconds default. 10 SECONDS — a distinct axis from the 10-TICK
+        /// DefaultStopBlinkLimit (D-7's two "10"s); schemaVersion stays 3.</summary>
+        public const int DefaultInfoVisibleSeconds = 10;
+
+        /// <summary>
+        /// SPEC-TRAY-016 (plan.md section J, pure): clamps any integer into 1..120 —
+        /// 0 and negatives load 1, anything above 120 loads 120.
+        /// </summary>
+        // @MX:NOTE: the 1..120 clamp bounds (the D-9 blink-limit pattern); changing a bound is a SPEC amendment.
+        public static int ClampInfoSeconds(int value)
+        {
+            if (value < 1)
+            {
+                return 1;
+            }
+            if (value > 120)
+            {
+                return 120;
+            }
+            return value;
+        }
+
         private readonly string path;
         private readonly Action<string> log;
 
@@ -620,7 +670,13 @@ namespace TerminalOrganizer.App
                     dto.attentionStopBlinkLimit.HasValue
                         ? ClampBlinkLimit(dto.attentionStopBlinkLimit.Value)
                         : DefaultStopBlinkLimit,
-                    dto.attentionOverlayTopmost == true);
+                    dto.attentionOverlayTopmost == true,
+                    // SPEC-TRAY-016 (REQ-PREF-001): the fifth attention value rides the same
+                    // camelCase DTO ternary as the D-9 blink limit — absent-key default 10,
+                    // clamp 1..120, per-key degrade (never a whole-file degradation).
+                    dto.attentionInfoVisibleSeconds.HasValue
+                        ? ClampInfoSeconds(dto.attentionInfoVisibleSeconds.Value)
+                        : DefaultInfoVisibleSeconds);
             }
             catch (Exception ex)
             {
@@ -658,10 +714,12 @@ namespace TerminalOrganizer.App
                 dto.crossMonitorRedistribution = values.CrossMonitorRedistribution;
                 // @MX:NOTE: SPEC-TRAY-013 REQ-SET-001 — every save writes the resolved boolean (absent key loads as true).
                 dto.attentionOverlay = values.AttentionOverlay;
-                // @MX:NOTE: SPEC-TRAY-014 REQ-SET-002 — every save also writes the three resolved option values.
+                // @MX:NOTE: SPEC-TRAY-014/016 REQ-SET-002 — every save also writes all five resolved attention values
+                // (overlay, policy, limit, topmost, info seconds) so no unrelated save reverts one.
                 dto.attentionEventPolicy = values.AttentionEventPolicy;
                 dto.attentionStopBlinkLimit = values.AttentionStopBlinkLimit;
                 dto.attentionOverlayTopmost = values.AttentionOverlayTopmost;
+                dto.attentionInfoVisibleSeconds = values.AttentionInfoVisibleSeconds;
                 // @MX:NOTE: generic-form parse; block kept verbatim, invalid parts included; fallback block on save.
                 // A value without a title-rules value (an older constructor) writes what loading the current file yields.
                 TitleRulesSettings block = values.HasTitleRules ? values.TitleRules : LoadCore(false).TitleRules;
@@ -840,6 +898,11 @@ namespace TerminalOrganizer.App
 
             /// <summary>SPEC-TRAY-014: the always-on-top setting; null/absent loads false.</summary>
             public bool? attentionOverlayTopmost;
+
+            /// <summary>SPEC-TRAY-016: the info visible-seconds cap; absent loads 10, any integer
+            /// clamps 1..120 (a per-key degrade, like the blink limit); a non-integer takes the
+            /// whole-file tolerant degradation.</summary>
+            public int? attentionInfoVisibleSeconds;
 
             /// <summary>The title-rules block in generic form (never a typed shape): a bad value inside it cannot degrade the file.</summary>
             public object titleRules;

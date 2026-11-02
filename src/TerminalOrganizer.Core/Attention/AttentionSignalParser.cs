@@ -81,6 +81,11 @@ namespace TerminalOrganizer.Core.Attention
             signal.Cwd = ReadOptionalString(map, "cwd");
             signal.Needle = needle;
             signal.Timestamp = ReadOptionalString(map, "timestamp");
+            // SPEC-TRAY-016 (REQ-FLD-001): the additive kind/message keys, recorded through
+            // the same optional-string rule — no new rejection reasons, unknown keys stay
+            // ignored, and every payload accepted today stays accepted (degrade-safe).
+            signal.Kind = ReadOptionalString(map, "kind");
+            signal.Message = ReadOptionalString(map, "message");
             return AttentionParseResult.Accept(signal);
         }
 

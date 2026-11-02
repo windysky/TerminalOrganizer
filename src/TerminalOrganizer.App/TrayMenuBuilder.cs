@@ -180,6 +180,7 @@ namespace TerminalOrganizer.App
         private readonly string attentionEventPolicy;
         private readonly int attentionStopBlinkLimit;
         private readonly bool attentionOverlayTopmost;
+        private readonly bool attentionRadioSubmenus;
         private readonly Dictionary<long, string> rowTexts;
 
         public TrayMenuState(bool busy, string hotkeyDisplay, MonitorInfo[] monitors, WindowSnapshot[] windows,
@@ -251,6 +252,29 @@ namespace TerminalOrganizer.App
             this.attentionOverlayTopmost = attentionOverlayTopmost;
         }
 
+        /// <summary>
+        /// SPEC-TRAY-015 M2 form (REQ-IA-001; AM-3, elected at Decision Point 1
+        /// 2026-10-31): the SPEC-TRAY-014 options bundle plus the radio-submenu era
+        /// flag — attention Event policy and Stop blinks render as radio submenus
+        /// (labels and exactly-one-checked semantics consistent with the existing
+        /// overflow-policy rows), the Enabled and Always-on-top check rows are
+        /// unchanged, and the root order is unchanged. Every earlier constructor era
+        /// keeps rendering exactly as its pinned suites assert (constructor-era
+        /// scoping); the radio-era flag stays false for all of them.
+        /// </summary>
+        // @MX:NOTE: [SPEC-TRAY-015 M2/AM-3] the M2-era constructor — the radio-submenu presentation for attention Event policy and Stop blinks; root order unchanged (REQ-IA-001).
+        public TrayMenuState(bool busy, string hotkeyDisplay, MonitorInfo[] monitors, WindowSnapshot[] windows,
+            ManagerSelector managerSelector, ManagerResolution managerResolution, string lastResultText,
+            bool mergeMenuEnabled, OverflowPolicy overflowPolicy, string[] windowRowTexts,
+            bool attentionOverlay, string attentionEventPolicy, int attentionStopBlinkLimit,
+            bool attentionOverlayTopmost, bool attentionRadioSubmenus)
+            : this(busy, hotkeyDisplay, monitors, windows, managerSelector, managerResolution,
+                lastResultText, mergeMenuEnabled, overflowPolicy, windowRowTexts, attentionOverlay,
+                attentionEventPolicy, attentionStopBlinkLimit, attentionOverlayTopmost)
+        {
+            this.attentionRadioSubmenus = attentionRadioSubmenus;
+        }
+
         private TrayMenuState(bool busy, string hotkeyDisplay, MonitorInfo[] monitors, WindowSnapshot[] windows,
             ManagerSelector managerSelector, ManagerResolution managerResolution, string lastResultText,
             bool mergeMenuEnabled, OverflowPolicy overflowPolicy, string[] windowRowTexts,
@@ -300,6 +324,9 @@ namespace TerminalOrganizer.App
 
         /// <summary>True when this state carries the SPEC-TRAY-014 options bundle and the submenu renders instead of the flat row.</summary>
         public bool HasAttentionOptions { get { return hasAttentionOptions; } }
+
+        /// <summary>True when this state carries the SPEC-TRAY-015 M2 radio-submenu era flag: Event policy and Stop blinks render as radio submenus (REQ-IA-001).</summary>
+        public bool HasAttentionRadioSubmenus { get { return attentionRadioSubmenus; } }
 
         /// <summary>The SPEC-TRAY-014 event policy; mixed outside the options era.</summary>
         public string AttentionEventPolicy
@@ -360,7 +387,6 @@ namespace TerminalOrganizer.App
             bool busy = state.Busy;
             List<MonitorInfo> monitors = CollectMonitors(state.Monitors);
             List<WindowSnapshot> snapshots = CollectSnapshots(state.Windows);
-            ManagerSelector selector = state.ManagerSelector == null ? ManagerSelector.None() : state.ManagerSelector;
 
             entries.Add(new TrayMenuEntry(TrayMenuEntryKind.Status,
                 busy ? BusyStatusText : "TerminalOrganizer — Ready", false, false, null, null, null, null));
@@ -376,10 +402,10 @@ namespace TerminalOrganizer.App
             // B4 busy UX: while phase != Idle every MUTATING root disables (manager
             // mutations, overflow settings, labels); Open log and Exit stay enabled.
             entries.Add(new TrayMenuEntry(TrayMenuEntryKind.ManagerRoot, "Manager", !busy, false, null, null, null,
-                BuildManagerChildren(selector, state.ManagerResolution, CollectCandidates(snapshots))));
+                BuildManagerChildren(state, CollectCandidates(snapshots))));
             entries.Add(Separator());
             entries.Add(new TrayMenuEntry(TrayMenuEntryKind.OverflowRoot, "Overflow behavior", !busy, false, null, null, null,
-                BuildOverflowChildren(state.OverflowPolicy)));
+                BuildOverflowChildren(state)));
             entries.Add(Separator());
             // SPEC-TRAY-013 REQ-UI-001 / SPEC-TRAY-014 D-8: the attention surface sits
             // between the Overflow root and the Labels-and-priorities root, enabled
@@ -388,6 +414,13 @@ namespace TerminalOrganizer.App
             // scoping: the options bundle renders the submenu; the SPEC-TRAY-013-era
             // constructor keeps the flat checkable row; pre-attention constructors keep
             // the pre-attention root order (every pinned legacy suite passes unedited).
+            // SPEC-TRAY-015 M2 (REQ-IA-001) re-presents the bundle's Event policy and
+            // Stop blinks rows as radio submenus inside the SAME root slot. t7 insertion
+            // convention (plan.md A-2 sequencing note): a future overlay-adjacent root
+            // row (the toast-overlay auto-handoff card) inserts between the attention
+            // surface and Labels and priorities, following this same era-scoped pattern —
+            // the era that ships it renders the new row, older constructors keep their
+            // pinned shapes.
             if (state.HasAttentionOptions)
             {
                 entries.Add(new TrayMenuEntry(TrayMenuEntryKind.AttentionRoot, "Attention overlay",
@@ -411,10 +444,196 @@ namespace TerminalOrganizer.App
                 string.IsNullOrEmpty(lastResult) ? "Last result: Not run yet" : lastResult,
                 false, false, null, null, lastResult, null));
             entries.Add(new TrayMenuEntry(TrayMenuEntryKind.OpenLog, "Open log", true, false, null, null, null, null));
-            entries.Add(new TrayMenuEntry(TrayMenuEntryKind.Settings, "Settings…", false, false, null, null, null, null));
+            // SPEC-TRAY-015 M3 (REQ-WIN-001; AM-2, elected 2026-10-31): the row is no
+            // longer the reserved disabled placeholder — it activates the modeless
+            // settings form. Text, position and the DISMISS classification (it opens a
+            // window; the menu closes) are unchanged; M3 touches only the enabled flag
+            // and the TrayContext click wiring.
+            entries.Add(new TrayMenuEntry(TrayMenuEntryKind.Settings, "Settings…", true, false, null, null, null, null));
             entries.Add(new TrayMenuEntry(TrayMenuEntryKind.Version, AppVersion.DisplayName, false, false, null, null, null, null));
             entries.Add(new TrayMenuEntry(TrayMenuEntryKind.Exit, "Exit", true, false, null, null, null, null));
             return entries.ToArray();
+        }
+
+        /// <summary>
+        /// SPEC-TRAY-015 M1 (REQ-STAY-004): the stay-open classification — a pure
+        /// function over TrayMenuEntryKind whose keep-open/dismiss partition is
+        /// exhaustive over every enum member. Exactly the 8 settings-mutation kinds
+        /// (the attention enable/policy/blinks/topmost rows and the SPEC-TRAY-013-era
+        /// flat toggle, the overflow policy rows, SetManager and ClearManager — itself
+        /// a settings mutation through SaveManagerSelector) keep the open menu open;
+        /// every other member (organize actions, submenu roots and group headers,
+        /// manager navigation, informational and terminal rows) dismisses.
+        /// Deterministic; never throws.
+        /// </summary>
+        // @MX:NOTE: [SPEC-TRAY-015 M1] the stay-open classification — the exhaustive keep-open/dismiss partition over TrayMenuEntryKind (REQ-STAY-004).
+        public static bool IsKeepOpenKind(TrayMenuEntryKind kind)
+        {
+            switch (kind)
+            {
+                case TrayMenuEntryKind.AttentionOverlay:
+                case TrayMenuEntryKind.AttentionEnabled:
+                case TrayMenuEntryKind.AttentionEventPolicy:
+                case TrayMenuEntryKind.AttentionStopBlinks:
+                case TrayMenuEntryKind.AttentionTopmost:
+                case TrayMenuEntryKind.OverflowPolicy:
+                case TrayMenuEntryKind.SetManager:
+                case TrayMenuEntryKind.ClearManager:
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        /// <summary>
+        /// SPEC-TRAY-015 M1 (REQ-STAY-002): the shared per-entry value derivation for
+        /// the settings-mutation rows. The fresh build (BuildAttentionChildren,
+        /// BuildOverflowChildren, BuildManagerChildren) and the live in-place update in
+        /// TrayContext BOTH render these rows through this call, so the live strip after
+        /// a settings change converges by construction to what a fresh build over the
+        /// post-save state produces. SPEC-TRAY-015 M2 (REQ-IA-001): for the attention
+        /// policy/blinks kinds a NON-EMPTY value derives the RADIO row of that value
+        /// (exactly-one-checked against the state); a null or empty value keeps the
+        /// legacy cycle row, so every earlier constructor era derives unchanged (an
+        /// empty string is never a radio value; the MenuStayOpen convergence rows reach
+        /// this legacy branch through PowerShell's null-to-empty string conversion).
+        /// Pure: no file, clock or process reads; a null state, a non-settings kind,
+        /// SetManager (per-candidate: see IsSelectedManagerCandidate) and an unknown
+        /// OverflowPolicy value id all return null — never an exception.
+        /// </summary>
+        // @MX:NOTE: [SPEC-TRAY-015 M1] the shared per-entry value derivation — live == fresh-build by construction (REQ-STAY-002).
+        // @MX:ANCHOR: [AUTO] the settings-row derivation shared by the fresh build and the live in-place update.
+        // @MX:REASON: 11 call sites (the builder's attention/overflow/manager children plus the TrayContext live walker); a divergent copy would silently desync the open menu from a fresh build.
+        public static TrayMenuEntry DeriveSettingsEntry(TrayMenuEntryKind kind, string value, TrayMenuState state)
+        {
+            if (state == null)
+            {
+                return null;
+            }
+            switch (kind)
+            {
+                case TrayMenuEntryKind.AttentionOverlay:
+                    return new TrayMenuEntry(kind, "Attention overlay", true, state.AttentionOverlay,
+                        null, null, null, null);
+                case TrayMenuEntryKind.AttentionEnabled:
+                    return new TrayMenuEntry(kind, "Enabled", true, state.AttentionOverlay,
+                        null, null, null, null);
+                case TrayMenuEntryKind.AttentionEventPolicy:
+                    if (!string.IsNullOrEmpty(value))
+                    {
+                        // SPEC-TRAY-015 M2 (REQ-IA-001): the radio row for one shipped
+                        // policy token — display-name label, exactly-one-checked against
+                        // the state, the token as Value (the OverflowPolicy row shape).
+                        return new TrayMenuEntry(kind, PolicyDisplayName(value), true,
+                            string.Equals(state.AttentionEventPolicy, value, StringComparison.Ordinal),
+                            null, null, value, null);
+                    }
+                    return new TrayMenuEntry(kind, "Event policy: " + PolicyDisplayName(state.AttentionEventPolicy),
+                        true, false, null, null, state.AttentionEventPolicy, null);
+                case TrayMenuEntryKind.AttentionStopBlinks:
+                    if (!string.IsNullOrEmpty(value))
+                    {
+                        // SPEC-TRAY-015 M2 (REQ-IA-001): the radio row for one shipped
+                        // blink limit — the limit as label, exactly-one-checked.
+                        return new TrayMenuEntry(kind, value, true,
+                            string.Equals(state.AttentionStopBlinkLimit.ToString(CultureInfo.InvariantCulture),
+                                value, StringComparison.Ordinal), null, null, value, null);
+                    }
+                    return new TrayMenuEntry(kind,
+                        "Stop blinks: " + state.AttentionStopBlinkLimit.ToString(CultureInfo.InvariantCulture),
+                        true, false, null, null, state.AttentionStopBlinkLimit.ToString(CultureInfo.InvariantCulture), null);
+                case TrayMenuEntryKind.AttentionTopmost:
+                    return new TrayMenuEntry(kind, "Always on top", true, state.AttentionOverlayTopmost,
+                        null, null, null, null);
+                case TrayMenuEntryKind.OverflowPolicy:
+                    {
+                        string label = OverflowPolicyLabel(value);
+                        if (label == null)
+                        {
+                            return null;
+                        }
+                        return new TrayMenuEntry(kind, label, !string.Equals(value, "merge", StringComparison.Ordinal),
+                            state.OverflowPolicy == OverflowPolicyValue(value), null, null, value, null);
+                    }
+                case TrayMenuEntryKind.ClearManager:
+                    return new TrayMenuEntry(kind, "Clear manager", !NormalizeSelector(state).IsEmpty,
+                        false, null, null, null, null);
+                case TrayMenuEntryKind.ManagerCurrent:
+                    return new TrayMenuEntry(kind,
+                        CurrentManagerLabel(NormalizeSelector(state), NormalizeResolution(state)),
+                        false, false, null, null, null, null);
+                default:
+                    return null;
+            }
+        }
+
+        /// <summary>
+        /// SPEC-TRAY-015 M1 (REQ-STAY-002): the shared SetManager checked-marker
+        /// predicate — the fresh build's candidate rows and the live in-place update
+        /// both decide the check here. Pure; a null candidate matches only the empty
+        /// selector (CreateSelector of null is None).
+        /// </summary>
+        public static bool IsSelectedManagerCandidate(ManagerSelector persisted, WindowSnapshot candidate)
+        {
+            ManagerSelector created = ManagerResolver.CreateSelector(candidate, ManagerResolver.DeriveUserLabel(candidate));
+            return persisted != null && persisted.Equals(created);
+        }
+
+        /// <summary>The persisted selector of one state, never null (BuildManagerChildren's normalization).</summary>
+        private static ManagerSelector NormalizeSelector(TrayMenuState state)
+        {
+            return state.ManagerSelector == null ? ManagerSelector.None() : state.ManagerSelector;
+        }
+
+        /// <summary>The resolution of one state, never null (BuildManagerChildren's normalization).</summary>
+        private static ManagerResolution NormalizeResolution(TrayMenuState state)
+        {
+            ManagerResolution status = state.ManagerResolution;
+            if (status == null)
+            {
+                status = new ManagerResolution(ManagerResolutionStatus.None, null, IntPtr.Zero, 0, null);
+            }
+            return status;
+        }
+
+        /// <summary>The label of one overflow policy row id (C3 shipped set); null for an unknown id.</summary>
+        private static string OverflowPolicyLabel(string value)
+        {
+            if (string.Equals(value, "ask", StringComparison.Ordinal))
+            {
+                return "Ask before overflow actions";
+            }
+            if (string.Equals(value, "stackOnly", StringComparison.Ordinal))
+            {
+                return "Stack only";
+            }
+            if (string.Equals(value, "merge", StringComparison.Ordinal))
+            {
+                return "Merge eligible tmux windows";
+            }
+            if (string.Equals(value, "moveLowest", StringComparison.Ordinal))
+            {
+                return "Move lowest-priority windows to free zones…";
+            }
+            return null;
+        }
+
+        /// <summary>The policy one overflow row id maps back to; ask for anything unrecognized-but-labeled.</summary>
+        private static OverflowPolicy OverflowPolicyValue(string value)
+        {
+            if (string.Equals(value, "stackOnly", StringComparison.Ordinal))
+            {
+                return OverflowPolicy.Stack;
+            }
+            if (string.Equals(value, "merge", StringComparison.Ordinal))
+            {
+                return OverflowPolicy.Merge;
+            }
+            if (string.Equals(value, "moveLowest", StringComparison.Ordinal))
+            {
+                return OverflowPolicy.Redistribute;
+            }
+            return OverflowPolicy.Ask;
         }
 
         /// <summary>
@@ -543,21 +762,17 @@ namespace TerminalOrganizer.App
             return rows.ToArray();
         }
 
-        private static TrayMenuEntry[] BuildManagerChildren(ManagerSelector selector,
-            ManagerResolution resolution, List<WindowSnapshot> candidates)
+        private static TrayMenuEntry[] BuildManagerChildren(TrayMenuState state, List<WindowSnapshot> candidates)
         {
-            ManagerResolution status = resolution;
-            if (status == null)
-            {
-                status = new ManagerResolution(ManagerResolutionStatus.None, null, IntPtr.Zero, 0, null);
-            }
+            ManagerSelector selector = NormalizeSelector(state);
+            ManagerResolution status = NormalizeResolution(state);
             List<TrayMenuEntry> children = new List<TrayMenuEntry>();
-            children.Add(new TrayMenuEntry(TrayMenuEntryKind.ManagerCurrent,
-                CurrentManagerLabel(selector, status), false, false, null, null, null, null));
+            // SPEC-TRAY-015 M1: the current-caption and Clear-manager rows render through
+            // the shared derivation so the live in-place update stays identical (REQ-STAY-002).
+            children.Add(DeriveSettingsEntry(TrayMenuEntryKind.ManagerCurrent, null, state));
             children.Add(new TrayMenuEntry(TrayMenuEntryKind.ShowManager, "Show / flash manager",
                 status.Status == ManagerResolutionStatus.Resolved, false, null, null, null, null));
-            children.Add(new TrayMenuEntry(TrayMenuEntryKind.ClearManager, "Clear manager",
-                !selector.IsEmpty, false, null, null, null, null));
+            children.Add(DeriveSettingsEntry(TrayMenuEntryKind.ClearManager, null, state));
             children.Add(Separator());
             children.Add(new TrayMenuEntry(TrayMenuEntryKind.ManagerCandidateGroup, "Choose manager",
                 candidates.Count > 0, false, null, null, null, BuildCandidateChildren(candidates, selector)));
@@ -622,10 +837,11 @@ namespace TerminalOrganizer.App
         {
             foreach (WindowSnapshot candidate in candidates)
             {
-                // Checked state (B2): the candidate whose newly created selector equals the persisted one.
-                ManagerSelector created = ManagerResolver.CreateSelector(candidate, ManagerResolver.DeriveUserLabel(candidate));
+                // Checked state (B2): the candidate whose newly created selector equals the
+                // persisted one — SPEC-TRAY-015 M1 routes the equality through the shared
+                // predicate so the live in-place update flips the same markers (REQ-STAY-002).
                 rows.Add(new TrayMenuEntry(TrayMenuEntryKind.SetManager, DisplayWindowCandidate(candidate),
-                    true, persisted != null && persisted.Equals(created), null,
+                    true, IsSelectedManagerCandidate(persisted, candidate), null,
                     new WindowMenuKey(candidate.Identity), null, null));
             }
         }
@@ -683,21 +899,68 @@ namespace TerminalOrganizer.App
             return 5;
         }
 
-        /// <summary>The submenu's four children (D-8): Enabled, Event policy, Stop blinks, Always on top.</summary>
+        /// <summary>The submenu's four children (D-8): Enabled, Event policy, Stop blinks,
+        /// Always on top — rendered through the shared derivation (SPEC-TRAY-015 M1, REQ-STAY-002).
+        /// SPEC-TRAY-015 M2 (REQ-IA-001/AM-3): in the radio era the two cycle rows render
+        /// as radio submenus instead; every earlier era keeps the pinned cycle shape.</summary>
         private static TrayMenuEntry[] BuildAttentionChildren(TrayMenuState state)
+        {
+            if (state.HasAttentionRadioSubmenus)
+            {
+                return BuildAttentionRadioChildren(state);
+            }
+            return new TrayMenuEntry[]
+            {
+                DeriveSettingsEntry(TrayMenuEntryKind.AttentionEnabled, null, state),
+                DeriveSettingsEntry(TrayMenuEntryKind.AttentionEventPolicy, null, state),
+                DeriveSettingsEntry(TrayMenuEntryKind.AttentionStopBlinks, null, state),
+                DeriveSettingsEntry(TrayMenuEntryKind.AttentionTopmost, null, state)
+            };
+        }
+
+        /// <summary>
+        /// SPEC-TRAY-015 M2 (REQ-IA-001; AM-3): the radio-era attention children — the
+        /// Enabled and Always-on-top check rows unchanged, Event policy and Stop blinks
+        /// as radio submenus matching the overflow-policy presentation. The sub-roots
+        /// reuse AttentionRoot (a navigating submenu root, DISMISS in the REQ-STAY-004
+        /// partition — the same one-kind-many-levels shape as ManagerCandidateGroup);
+        /// the radio rows are the settings-mutation kinds, so they ride the M1
+        /// keep-open machinery unchanged.
+        /// </summary>
+        private static TrayMenuEntry[] BuildAttentionRadioChildren(TrayMenuState state)
         {
             return new TrayMenuEntry[]
             {
-                new TrayMenuEntry(TrayMenuEntryKind.AttentionEnabled, "Enabled",
-                    true, state.AttentionOverlay, null, null, null, null),
-                new TrayMenuEntry(TrayMenuEntryKind.AttentionEventPolicy,
-                    "Event policy: " + PolicyDisplayName(state.AttentionEventPolicy),
-                    true, false, null, null, state.AttentionEventPolicy, null),
-                new TrayMenuEntry(TrayMenuEntryKind.AttentionStopBlinks,
-                    "Stop blinks: " + state.AttentionStopBlinkLimit.ToString(CultureInfo.InvariantCulture),
-                    true, false, null, null, state.AttentionStopBlinkLimit.ToString(CultureInfo.InvariantCulture), null),
-                new TrayMenuEntry(TrayMenuEntryKind.AttentionTopmost, "Always on top",
-                    true, state.AttentionOverlayTopmost, null, null, null, null)
+                DeriveSettingsEntry(TrayMenuEntryKind.AttentionEnabled, null, state),
+                new TrayMenuEntry(TrayMenuEntryKind.AttentionRoot, "Event policy", true, false, null, null, null,
+                    BuildPolicyRadioChildren(state)),
+                new TrayMenuEntry(TrayMenuEntryKind.AttentionRoot, "Stop blinks", true, false, null, null, null,
+                    BuildBlinkRadioChildren(state)),
+                DeriveSettingsEntry(TrayMenuEntryKind.AttentionTopmost, null, state)
+            };
+        }
+
+        /// <summary>The Event policy radio rows (M2): the three shipped tokens in the pinned
+        /// cycle's order, each rendered through the shared derivation (exactly-one-checked).</summary>
+        private static TrayMenuEntry[] BuildPolicyRadioChildren(TrayMenuState state)
+        {
+            return new TrayMenuEntry[]
+            {
+                DeriveSettingsEntry(TrayMenuEntryKind.AttentionEventPolicy, AttentionPolicyResolver.PolicyMixed, state),
+                DeriveSettingsEntry(TrayMenuEntryKind.AttentionEventPolicy, AttentionPolicyResolver.PolicyAll, state),
+                DeriveSettingsEntry(TrayMenuEntryKind.AttentionEventPolicy, AttentionPolicyResolver.PolicyNotifications, state)
+            };
+        }
+
+        /// <summary>The Stop blinks radio rows (M2): the three shipped limits in the pinned
+        /// cycle's order, each rendered through the shared derivation (exactly-one-checked).</summary>
+        private static TrayMenuEntry[] BuildBlinkRadioChildren(TrayMenuState state)
+        {
+            return new TrayMenuEntry[]
+            {
+                DeriveSettingsEntry(TrayMenuEntryKind.AttentionStopBlinks, "5", state),
+                DeriveSettingsEntry(TrayMenuEntryKind.AttentionStopBlinks, "10", state),
+                DeriveSettingsEntry(TrayMenuEntryKind.AttentionStopBlinks, "20", state)
             };
         }
 
@@ -719,22 +982,19 @@ namespace TerminalOrganizer.App
             return policy == null ? string.Empty : policy;
         }
 
-        private static TrayMenuEntry[] BuildOverflowChildren(OverflowPolicy policy)
+        private static TrayMenuEntry[] BuildOverflowChildren(TrayMenuState state)
         {
             // C3: the four persisted policies — exactly one checked (the saved policy),
             // selection saves immediately and never organizes. Merge ships DISABLED
             // while the release gate is closed (a saved-but-disabled Merge stays
-            // checked; the run degrades to Stack with one warning).
+            // checked; the run degrades to Stack with one warning). Rendered through
+            // the shared derivation (SPEC-TRAY-015 M1, REQ-STAY-002).
             return new TrayMenuEntry[]
             {
-                new TrayMenuEntry(TrayMenuEntryKind.OverflowPolicy, "Ask before overflow actions",
-                    true, policy == OverflowPolicy.Ask, null, null, "ask", null),
-                new TrayMenuEntry(TrayMenuEntryKind.OverflowPolicy, "Stack only",
-                    true, policy == OverflowPolicy.Stack, null, null, "stackOnly", null),
-                new TrayMenuEntry(TrayMenuEntryKind.OverflowPolicy, "Merge eligible tmux windows",
-                    false, policy == OverflowPolicy.Merge, null, null, "merge", null),
-                new TrayMenuEntry(TrayMenuEntryKind.OverflowPolicy, "Move lowest-priority windows to free zones…",
-                    true, policy == OverflowPolicy.Redistribute, null, null, "moveLowest", null)
+                DeriveSettingsEntry(TrayMenuEntryKind.OverflowPolicy, "ask", state),
+                DeriveSettingsEntry(TrayMenuEntryKind.OverflowPolicy, "stackOnly", state),
+                DeriveSettingsEntry(TrayMenuEntryKind.OverflowPolicy, "merge", state),
+                DeriveSettingsEntry(TrayMenuEntryKind.OverflowPolicy, "moveLowest", state)
             };
         }
 

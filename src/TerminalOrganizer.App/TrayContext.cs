@@ -662,6 +662,14 @@ namespace TerminalOrganizer.App
         private OrganizeRequest activeRequest;
         private bool topologyRerunArmed;
         private string lastResultText;
+        // SPEC-TRAY-015 M1: the one-shot stay-open flag (armed by a settings activation,
+        // consumed by the Closing handler) and the last-open manager state feeding the
+        // in-place live update (REQ-STAY-001/002).
+        private bool keepMenuOpenOnClose;
+        private ManagerResolution lastManagerResolution;
+        private WindowSnapshot[] lastMenuSnapshots;
+        // SPEC-TRAY-015 M3 (REQ-WIN-001): the single-instance settings-form reference.
+        private SettingsForm settingsForm;
         private const string TopologyRerunSource = "topology-rerun";
 
         internal TrayShell()
@@ -699,10 +707,12 @@ namespace TerminalOrganizer.App
             // SPEC-TRAY-013/014: the attention controller (REQ-CTL-001) polls the WSL producer's
             // signal directory and blinks the overlay; constructed AFTER the log and the
             // marshalling message window exist (its marshal seam needs the live control). The
-            // SPEC-TRAY-014 options (D-7/D-9, the D-6 extension) arrive from the loaded settings.
+            // SPEC-TRAY-014 options (D-7/D-9, the D-6 extension) arrive from the loaded settings;
+            // SPEC-TRAY-016 adds the info visible-seconds cap (REQ-PREF-001, the fifth value).
             this.attention = AttentionController.CreateProduction(this.log, this.messageWindow,
                 AttentionSignalDirectory(), current.AttentionOverlay, current.AttentionEventPolicy,
-                current.AttentionStopBlinkLimit, current.AttentionOverlayTopmost);
+                current.AttentionStopBlinkLimit, current.AttentionOverlayTopmost,
+                current.AttentionInfoVisibleSeconds);
             if (!current.AttentionOverlay)
             {
                 // D-2 default ON; an explicit false in the file starts the controller disabled.
@@ -779,14 +789,22 @@ namespace TerminalOrganizer.App
                 delegate(string line) { log.Append(line); });
             ManagerSelector selector = current.ManagerSelector == null ? ManagerSelector.None() : current.ManagerSelector;
             ManagerResolution resolution = ManagerResolver.Resolve(selector, discovered.Facts, discovered.Snapshots);
+            // SPEC-TRAY-015 M1: the last-open resolution and snapshots feed the in-place
+            // live update (REQ-STAY-002). The candidate list and manager status stay
+            // those of this menu open — the accepted next-open refresh semantics (spec 2.2).
+            this.lastManagerResolution = resolution;
+            this.lastMenuSnapshots = discovered.Snapshots;
             // REQ-UI-001: one row text per window (rank and provenance from this read's overrides and default rank).
             string[] rowTexts = RuleProvenance.RowTexts(discovered.Snapshots, current.PriorityOverrides,
                 current.TitleRules.DefaultRank);
+            // SPEC-TRAY-015 M2 (REQ-IA-001): the shell builds the radio-submenu era —
+            // Event policy and Stop blinks render as radio rows over the same bundle.
             TrayMenuState state = new TrayMenuState(coordinator.IsBusy, current.Hotkey,
                 ports.Monitors.GetMonitors(), discovered.Snapshots, selector, resolution,
                 this.lastResultText, current.MergeEnabled, current.OverflowPolicy, rowTexts,
                 current.AttentionOverlay, current.AttentionEventPolicy,
-                current.AttentionStopBlinkLimit, current.AttentionOverlayTopmost);
+                current.AttentionStopBlinkLimit, current.AttentionOverlayTopmost,
+                attentionRadioSubmenus: true);
             TrayMenuEntry[] entries = TrayMenuBuilder.Build(state);
             ContextMenuStrip built = new ContextMenuStrip();
             foreach (TrayMenuEntry entry in entries)
@@ -797,6 +815,7 @@ namespace TerminalOrganizer.App
                     built.Items.Add(item);
                 }
             }
+            WireStayOpenClosing(built);
             return built;
         }
 
@@ -896,6 +915,12 @@ namespace TerminalOrganizer.App
                 case TrayMenuEntryKind.OpenLog:
                     item.Click += delegate { OpenLogFile(); };
                     break;
+                case TrayMenuEntryKind.Settings:
+                    // SPEC-TRAY-015 M3 (REQ-WIN-001; AM-2): the activated row opens the
+                    // single-instance modeless settings form; the menu itself dismisses
+                    // (the Settings kind keeps its DISMISS classification, REQ-STAY-004).
+                    item.Click += delegate { ShowSettingsForm(); };
+                    break;
                 case TrayMenuEntryKind.Exit:
                     item.Click += delegate { RequestApplicationExit(); };
                     break;
@@ -926,6 +951,215 @@ namespace TerminalOrganizer.App
                 }
                 old.Dispose();
             }
+        }
+
+        /// <summary>
+        /// SPEC-TRAY-015 M1 (REQ-STAY-001): registers the stay-open cancellation on the
+        /// root strip and every dropdown (nested dropdowns raise Closing on their OWN
+        /// dropdown — plan.md B6). One subscription expression, one handler; called from
+        /// every build so every rebuilt strip is wired.
+        /// </summary>
+        private void WireStayOpenClosing(ToolStripDropDown strip)
+        {
+            strip.Closing += new ToolStripDropDownClosingEventHandler(this.MenuDropdownClosing);
+            foreach (ToolStripItem item in strip.Items)
+            {
+                ToolStripDropDownItem dropDown = item as ToolStripDropDownItem;
+                if (dropDown != null)
+                {
+                    WireStayOpenClosing(dropDown.DropDown);
+                }
+            }
+        }
+
+        /// <summary>
+        /// SPEC-TRAY-015 M1 (REQ-STAY-001): while the one-shot keep-open flag is set (a
+        /// settings activation just ran), cancels ONLY the item-activation closes (mouse
+        /// or keyboard). A genuine dismissal — click outside, focus loss, the Esc key —
+        /// always closes; the menu is never made unclosable.
+        /// </summary>
+        // @MX:NOTE: [SPEC-TRAY-015 M1/AM-1] the stay-open keep-open flag + Closing handler — cancel is flag-scoped to item activations (mouse or keyboard); explicit dismissal always closes.
+        private void MenuDropdownClosing(object sender, ToolStripDropDownClosingEventArgs e)
+        {
+            if (!this.keepMenuOpenOnClose)
+            {
+                return;
+            }
+            if (e.CloseReason == ToolStripDropDownCloseReason.ItemClicked
+                || e.CloseReason == ToolStripDropDownCloseReason.Keyboard)
+            {
+                e.Cancel = true;
+                // One activation closes a CHAIN of dropdowns: keep the flag until the
+                // chain settles (the posted callback runs after this input event has
+                // finished dispatching) so every level cancels, yet a later Esc or
+                // click-away — which cannot overtake a posted message — still closes.
+                this.messageWindow.BeginInvoke(new Action(ClearKeepOpenFlag));
+            }
+            else
+            {
+                this.keepMenuOpenOnClose = false;
+            }
+        }
+
+        private void ClearKeepOpenFlag()
+        {
+            this.keepMenuOpenOnClose = false;
+        }
+
+        /// <summary>
+        /// SPEC-TRAY-015 M3 (REQ-WIN-001; AM-2 — the ELECTED supersession of the
+        /// TRAY-007 section 1.1/6 and TRAY-014 section 5 windowless commitments):
+        /// the settings-form entry point — ONE modeless SettingsForm over the
+        /// EXISTING settings surface, single-instance: a live instance is focused
+        /// (restored if minimized, then activated), never re-created; a fresh
+        /// instance is shown only when none is alive. The Settings row DISMISSES
+        /// the menu (the REQ-STAY-004 partition is unchanged by M3), so this path
+        /// never arms the stay-open flag. Sync-audit fix F1: the form's write
+        /// paths persist through the static helpers without touching the strip,
+        /// so the fresh instance wires ONE FormClosed rebuild of the menu — the
+        /// strip reflects every form write on the NEXT open (the AC-008 manual
+        /// row), while a settings click still never rebuilds under the open
+        /// menu (REQ-STAY-003).
+        /// </summary>
+        // @MX:NOTE: [SPEC-TRAY-015 M3/AM-2] the settings-form entry point + single-instance wiring — focus-existing on reopen; the row's dismiss classification is unchanged (REQ-WIN-001).
+        private void ShowSettingsForm()
+        {
+            if (this.settingsForm != null && !this.settingsForm.IsDisposed)
+            {
+                if (!this.settingsForm.Visible)
+                {
+                    this.settingsForm.Show();
+                }
+                if (this.settingsForm.WindowState == FormWindowState.Minimized)
+                {
+                    this.settingsForm.WindowState = FormWindowState.Normal;
+                }
+                this.settingsForm.Activate();
+                return;
+            }
+            this.settingsForm = new SettingsForm(this, this.settings, this.attention, this.log,
+                new Func<AppSettings, TrayMenuState>(this.MenuStateForLiveUpdate));
+            // SPEC-TRAY-015 F1 (sync-audit MAJOR, Functionality): the form's writes
+            // persist through the static helpers but never refreshed the strip, so
+            // the menu showed stale settings until the next organize run. The menu
+            // is dismissed while the form is up, so ONE rebuild when the form
+            // closes makes the next open fresh — and because the subscription rides
+            // the owned form instance, ALL form write paths (attention enable /
+            // policy / blinks / topmost, overflow policy, manager selection) are
+            // covered by the single rebuild; the reopen path (focus-existing) keeps
+            // the subscription its instance already wired.
+            // @MX:NOTE: [SPEC-TRAY-015 F1] form-closed menu refresh — the settings-form writes persist but never refreshed the live strip; ONE FormClosed rebuild makes the next menu open reflect them.
+            this.settingsForm.FormClosed += delegate
+            {
+                RebuildMenu();
+            };
+            this.settingsForm.Show();
+        }
+
+        /// <summary>
+        /// SPEC-TRAY-015 M1 (AM-1, REQ-STAY-002/003): the settings clicks' post-save
+        /// path — update the LIVE strip in place through the shared derivation (never a
+        /// rebuild, never a dispose) and arm the one-shot keep-open flag so the closing
+        /// menu stays open.
+        /// </summary>
+        private void KeepMenuOpenWithSettingsUpdate()
+        {
+            ApplySettingsUpdateInPlace();
+            this.keepMenuOpenOnClose = true;
+        }
+
+        /// <summary>
+        /// The in-place live-strip update (REQ-STAY-002): re-derives every settings row
+        /// through the shared TrayMenuBuilder derivation over the post-save settings and
+        /// mutates the live items — the busy-flip precedent (DisableOrganizeMenuItems),
+        /// never a rebuild. While busy, the busy flip owns the Enabled flags, so the
+        /// update skips Enabled (busy-disabled rows stay disabled).
+        /// </summary>
+        private void ApplySettingsUpdateInPlace()
+        {
+            if (this.menu == null)
+            {
+                return;
+            }
+            TrayMenuState state = MenuStateForLiveUpdate(settings.Load());
+            foreach (ToolStripItem item in this.menu.Items)
+            {
+                UpdateSettingsItemInPlace(item, state);
+            }
+        }
+
+        /// <summary>The derivation state for one live update: the post-save settings
+        /// joined with the last-open resolution and snapshots (spec 2.2 next-open
+        /// refresh semantics). Built in the SAME M2 radio era as the menu build so the
+        /// live radio rows derive against the era that rendered them (REQ-IA-001).</summary>
+        private TrayMenuState MenuStateForLiveUpdate(AppSettings current)
+        {
+            ManagerSelector selector = current.ManagerSelector == null
+                ? ManagerSelector.None() : current.ManagerSelector;
+            return new TrayMenuState(this.coordinator.IsBusy, current.Hotkey,
+                null, this.lastMenuSnapshots, selector, this.lastManagerResolution,
+                this.lastResultText, current.MergeEnabled, current.OverflowPolicy, null,
+                current.AttentionOverlay, current.AttentionEventPolicy,
+                current.AttentionStopBlinkLimit, current.AttentionOverlayTopmost,
+                attentionRadioSubmenus: true);
+        }
+
+        /// <summary>Walks the live tree (the busy-flip shape): every settings-mutation
+        /// row and the manager current caption re-render through the shared derivation;
+        /// the SetManager rows flip their checked markers through the shared predicate.</summary>
+        private static void UpdateSettingsItemInPlace(ToolStripItem item, TrayMenuState state)
+        {
+            TrayMenuEntry entry = item == null ? null : item.Tag as TrayMenuEntry;
+            ToolStripMenuItem menuItem = item as ToolStripMenuItem;
+            if (entry != null && menuItem != null)
+            {
+                bool isSettingsRow = TrayMenuBuilder.IsKeepOpenKind(entry.Kind);
+                bool isManagerCaption = entry.Kind == TrayMenuEntryKind.ManagerCurrent;
+                if (isSettingsRow || isManagerCaption)
+                {
+                    TrayMenuEntry updated = TrayMenuBuilder.DeriveSettingsEntry(entry.Kind, entry.Value, state);
+                    if (updated != null)
+                    {
+                        menuItem.Text = updated.Label;
+                        menuItem.CheckState = updated.Checked ? CheckState.Checked : CheckState.Unchecked;
+                        if (!state.Busy)
+                        {
+                            menuItem.Enabled = updated.Enabled;
+                        }
+                    }
+                }
+                if (entry.Kind == TrayMenuEntryKind.SetManager)
+                {
+                    menuItem.CheckState = TrayMenuBuilder.IsSelectedManagerCandidate(
+                        state.ManagerSelector, FindLiveCandidate(state.Windows, entry.WindowKey))
+                        ? CheckState.Checked : CheckState.Unchecked;
+                }
+            }
+            ToolStripDropDownItem dropDown = item as ToolStripDropDownItem;
+            if (dropDown != null)
+            {
+                foreach (ToolStripItem child in dropDown.DropDownItems)
+                {
+                    UpdateSettingsItemInPlace(child, state);
+                }
+            }
+        }
+
+        /// <summary>The last-open snapshot of one candidate row, joined by handle; null when absent.</summary>
+        private static WindowSnapshot FindLiveCandidate(WindowSnapshot[] windows, WindowMenuKey key)
+        {
+            if (windows == null || key == null || key.Identity == null)
+            {
+                return null;
+            }
+            foreach (WindowSnapshot window in windows)
+            {
+                if (window != null && window.Identity != null && window.Identity.Handle == key.Identity.Handle)
+                {
+                    return window;
+                }
+            }
+            return null;
         }
 
         /// <summary>Hotkey entry (A5): queue an under-cursor organize request on the coordinator.</summary>
@@ -1158,43 +1392,86 @@ namespace TerminalOrganizer.App
         /// B2 click-time selector creation: re-resolves the WindowMenuKey against a FRESH
         /// discovery (the menu payload HWND is short-lived — validate the whole
         /// WindowIdentity) and persists the canonical selector, never the display label.
+        /// SPEC-TRAY-015 M3: the validation core is extracted (CreateValidatedManager)
+        /// so the settings form's manager selection reuses the identical re-resolve.
         /// </summary>
         private void SetManagerFromMenu(WindowMenuKey key)
         {
             try
             {
-                if (key == null || key.Identity == null)
+                ManagerSelector created = CreateValidatedManager(key);
+                if (created != null)
                 {
-                    log.Append("set manager skipped: menu identity missing");
-                    return;
+                    SaveManagerSelector(created);
                 }
-                WindowSnapshot[] fresh = Composition.ReadWindowsForMenu(ports.Controller.Labels,
-                    delegate(string line) { log.Append(line); }).Snapshots;
-                WindowSnapshot match = null;
-                bool multiple = false;
-                foreach (WindowSnapshot snapshot in fresh)
+            }
+            catch (Exception ex)
+            {
+                log.Append("set manager failed: " + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// The B2 click-time validation core (shared by the menu path and the
+        /// SPEC-TRAY-015 M3 settings form): re-resolves the key against a FRESH
+        /// discovery and creates the canonical selector (with the user label when
+        /// one is registered); null — with one log line — when the key carries no
+        /// identity or no longer matches exactly one discovered window.
+        /// </summary>
+        private ManagerSelector CreateValidatedManager(WindowMenuKey key)
+        {
+            if (key == null || key.Identity == null)
+            {
+                log.Append("set manager skipped: menu identity missing");
+                return null;
+            }
+            WindowSnapshot[] fresh = Composition.ReadWindowsForMenu(ports.Controller.Labels,
+                delegate(string line) { log.Append(line); }).Snapshots;
+            WindowSnapshot match = null;
+            bool multiple = false;
+            foreach (WindowSnapshot snapshot in fresh)
+            {
+                if (snapshot == null || snapshot.Identity == null)
                 {
-                    if (snapshot == null || snapshot.Identity == null)
+                    continue;
+                }
+                if (snapshot.Identity.EqualsForMutation(key.Identity))
+                {
+                    if (match != null)
                     {
-                        continue;
+                        multiple = true;
+                        break;
                     }
-                    if (snapshot.Identity.EqualsForMutation(key.Identity))
-                    {
-                        if (match != null)
-                        {
-                            multiple = true;
-                            break;
-                        }
-                        match = snapshot;
-                    }
+                    match = snapshot;
                 }
-                if (multiple || match == null)
+            }
+            if (multiple || match == null)
+            {
+                log.Append("set manager skipped: window no longer matches its menu identity");
+                return null;
+            }
+            string userLabel = ports.Controller.Labels.TryGetLabel(match.Handle);
+            return ManagerResolver.CreateSelector(match, userLabel);
+        }
+
+        /// <summary>
+        /// SPEC-TRAY-015 M3 (REQ-WIN-001): the settings form's manager selection — the
+        /// menu path's click-time validation reused (CreateValidatedManager), persisted
+        /// through the same existing static helper with the same log line, but with NO
+        /// keep-open arming: the menu is closed while the form is up, and the one-shot
+        /// flag must never be armed outside a live menu session (a leaked flag would
+        /// swallow the next session's first item-activation close).
+        /// </summary>
+        internal void SelectManagerFromSettingsForm(WindowMenuKey key)
+        {
+            try
+            {
+                ManagerSelector created = CreateValidatedManager(key);
+                if (created != null)
                 {
-                    log.Append("set manager skipped: window no longer matches its menu identity");
-                    return;
+                    SaveManagerSelectorTo(settings, created);
+                    log.Append("manager window set to " + created.Kind + " '" + created.Value + "'");
                 }
-                string userLabel = ports.Controller.Labels.TryGetLabel(match.Handle);
-                SaveManagerSelector(ManagerResolver.CreateSelector(match, userLabel));
             }
             catch (Exception ex)
             {
@@ -1253,7 +1530,7 @@ namespace TerminalOrganizer.App
             log.Append(value.IsEmpty
                 ? "manager window cleared"
                 : "manager window set to " + value.Kind + " '" + value.Value + "'");
-            RebuildMenu();
+            KeepMenuOpenWithSettingsUpdate();
         }
 
         /// <summary>
@@ -1263,11 +1540,12 @@ namespace TerminalOrganizer.App
         private void SelectOverflowPolicy(string value)
         {
             SaveOverflowPolicy(ParsePolicyValue(value));
-            RebuildMenu();
+            KeepMenuOpenWithSettingsUpdate();
         }
 
         /// <summary>SPEC-TRAY-013 toggle (REQ-UI-001): save the negated value, flip the
-        /// controller (stop-or-allow overlays, REQ-CTL-001), rebuild the menu; never organizes.</summary>
+        /// controller (stop-or-allow overlays, REQ-CTL-001), update the open menu in place
+        /// (SPEC-TRAY-015 M1); never organizes.</summary>
         private void ToggleAttentionOverlay()
         {
             bool value = ToggleAttentionOverlayTo(settings);
@@ -1276,46 +1554,48 @@ namespace TerminalOrganizer.App
                 this.attention.SetEnabled(value);
             }
             log.Append(value ? "attention overlay enabled" : "attention overlay disabled");
-            RebuildMenu();
+            KeepMenuOpenWithSettingsUpdate();
         }
 
-        /// <summary>SPEC-TRAY-014 D-8: the policy cycle row — save the next token of the pinned
-        /// order, apply to the controller, one log line, rebuild; never organizes.</summary>
-        private void SelectAttentionEventPolicy(string current)
+        /// <summary>SPEC-TRAY-015 M2 (REQ-IA-001; the TRAY-014 D-8 row re-presented): the
+        /// Event policy radio row — save the clicked row's own token directly (radio
+        /// selection replaces the cycle advance), apply to the controller, one log line,
+        /// in-place update through the M1 machinery (REQ-STAY-001/002); never organizes.</summary>
+        private void SelectAttentionEventPolicy(string value)
         {
-            string next = TrayMenuBuilder.NextPolicy(current);
-            SaveAttentionEventPolicyTo(settings, next);
+            SaveAttentionEventPolicyTo(settings, value);
             if (this.attention != null)
             {
-                this.attention.SetEventPolicy(next);
+                this.attention.SetEventPolicy(value);
             }
-            log.Append("attention overlay event policy set to " + next);
-            RebuildMenu();
+            log.Append("attention overlay event policy set to " + value);
+            KeepMenuOpenWithSettingsUpdate();
         }
 
-        /// <summary>SPEC-TRAY-014 D-9: the stop-blinks cycle row — save the next value of the
-        /// pinned order (5/10/20), apply, one log line, rebuild; never organizes.</summary>
-        private void SelectAttentionStopBlinks(string current)
+        /// <summary>SPEC-TRAY-015 M2 (REQ-IA-001; the TRAY-014 D-9 row re-presented): the
+        /// Stop blinks radio row — save the clicked row's own limit directly (radio
+        /// selection replaces the cycle advance), apply, one log line, in-place update
+        /// through the M1 machinery (REQ-STAY-001/002); never organizes.</summary>
+        private void SelectAttentionStopBlinks(string value)
         {
-            int value;
-            if (!int.TryParse(current, NumberStyles.Integer, CultureInfo.InvariantCulture, out value))
+            int limit;
+            if (!int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out limit))
             {
                 return;
             }
-            int next = TrayMenuBuilder.NextBlinkLimit(value);
-            SaveAttentionStopBlinksTo(settings, next);
+            SaveAttentionStopBlinksTo(settings, limit);
             if (this.attention != null)
             {
-                this.attention.SetStopBlinkLimit(next);
+                this.attention.SetStopBlinkLimit(limit);
             }
             log.Append("attention overlay stop blinks set to "
-                + next.ToString(CultureInfo.InvariantCulture));
-            RebuildMenu();
+                + limit.ToString(CultureInfo.InvariantCulture));
+            KeepMenuOpenWithSettingsUpdate();
         }
 
         /// <summary>SPEC-TRAY-014 (the D-6 extension): the always-on-top row — save the negated
         /// value, apply to the controller (new creations pick it up; live rings keep their
-        /// mode), one log line, rebuild; never organizes.</summary>
+        /// mode), one log line, in-place update (SPEC-TRAY-015 M1); never organizes.</summary>
         private void ToggleAttentionTopmost()
         {
             bool value = !settings.Load().AttentionOverlayTopmost;
@@ -1326,11 +1606,11 @@ namespace TerminalOrganizer.App
             }
             log.Append(value ? "attention overlay always on top enabled"
                 : "attention overlay always on top disabled");
-            RebuildMenu();
+            KeepMenuOpenWithSettingsUpdate();
         }
 
         // @MX:NOTE: static toggle save so the round trip is testable (the SaveManagerSelectorTo pattern); carries every other field through.
-        // SPEC-TRAY-014 REQ-SET-002: the toggle and the three option saves each carry ALL FOUR attention values.
+        // SPEC-TRAY-014/016 REQ-SET-002: the toggle and the three option saves each carry ALL FIVE attention values.
         internal static bool ToggleAttentionOverlayTo(SettingsStore store)
         {
             AppSettings current = store.Load();
@@ -1369,14 +1649,19 @@ namespace TerminalOrganizer.App
         private static void SaveAttentionBundle(SettingsStore store, AppSettings current,
             bool enable, string policy, int limit, bool topmost)
         {
+            // SPEC-TRAY-016 (REQ-PREF-001): the fifth attention value threads through the same
+            // construction — every attention save carries all five values.
             store.Save(new AppSettings(current.Hotkey, current.LogPath, current.ManagerWindowName,
                 current.MergeEnabled, current.FirstRunCompleted, current.StartWithWindows,
                 current.ManagerSelector, current.PriorityOverrides, current.SchemaVersion,
                 current.OverflowPolicy, current.CrossMonitorRedistribution, current.TitleRules,
-                enable, policy, limit, topmost));
+                enable, policy, limit, topmost, current.AttentionInfoVisibleSeconds));
         }
 
-        /// <summary>The producer's signal directory (plan.md section J): %LOCALAPPDATA%\wsl-toast\attention.</summary>
+        /// <summary>The producer's signal directory (plan.md section J): %LOCALAPPDATA%\wsl-toast\attention.
+        /// SPEC-TRAY-016 M1 (AM-1): the heartbeat writer's organizer.json lives in this same
+        /// directory — the one sanctioned Windows-side writer beside the store's consume-delete;
+        /// it never matches att-*.json and is never deleted (staleness is the signal).</summary>
         private static string AttentionSignalDirectory()
         {
             return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -1395,7 +1680,7 @@ namespace TerminalOrganizer.App
         }
 
         // @MX:NOTE: the two tray saves are static so the title-rules block they carry is testable (REQ-SET-002); both keep the block of the settings they read.
-        // SPEC-TRAY-013 (plan.md F row 10) + SPEC-TRAY-014 (REQ-SET-002): both carry ALL FOUR attention values through so no unrelated save reverts one.
+        // SPEC-TRAY-013 (plan.md F row 10) + SPEC-TRAY-014/016 (REQ-SET-002): both carry ALL FIVE attention values through so no unrelated save reverts one.
         internal static void SaveManagerSelectorTo(SettingsStore store, ManagerSelector selector)
         {
             ManagerSelector value = selector == null ? ManagerSelector.None() : selector;
@@ -1405,7 +1690,8 @@ namespace TerminalOrganizer.App
                 current.MergeEnabled, current.FirstRunCompleted, current.StartWithWindows, value,
                 current.PriorityOverrides, current.SchemaVersion, current.OverflowPolicy,
                 current.CrossMonitorRedistribution, current.TitleRules, current.AttentionOverlay,
-                current.AttentionEventPolicy, current.AttentionStopBlinkLimit, current.AttentionOverlayTopmost));
+                current.AttentionEventPolicy, current.AttentionStopBlinkLimit, current.AttentionOverlayTopmost,
+                current.AttentionInfoVisibleSeconds));
         }
 
         internal static void SaveOverflowPolicyTo(SettingsStore store, OverflowPolicy policy)
@@ -1415,11 +1701,16 @@ namespace TerminalOrganizer.App
                 current.MergeEnabled, current.FirstRunCompleted, current.StartWithWindows,
                 current.ManagerSelector, current.PriorityOverrides, current.SchemaVersion,
                 policy, policy == OverflowPolicy.Redistribute, current.TitleRules, current.AttentionOverlay,
-                current.AttentionEventPolicy, current.AttentionStopBlinkLimit, current.AttentionOverlayTopmost));
+                current.AttentionEventPolicy, current.AttentionStopBlinkLimit, current.AttentionOverlayTopmost,
+                current.AttentionInfoVisibleSeconds));
         }
 
-        /// <summary>The menu row value ids (B2 shipped) mapped back to the policy.</summary>
-        private static OverflowPolicy ParsePolicyValue(string value)
+        /// <summary>The row value ids (B2 shipped) mapped back to the policy — the
+        /// shell-side id-to-policy map, reused by the SPEC-TRAY-015 M3 settings form.
+        /// A second map exists by design (TrayMenuBuilder.OverflowPolicyValue): the
+        /// pure model keeps its own copy so it stays WinForms-free — the builder
+        /// never depends back on this shell class.</summary>
+        internal static OverflowPolicy ParsePolicyValue(string value)
         {
             if (string.Equals(value, "stackOnly", StringComparison.Ordinal))
             {
@@ -1545,6 +1836,11 @@ namespace TerminalOrganizer.App
                 // SPEC-TRAY-013: the controller's own pinned order applies inside (poll
                 // timer, blink timer, in-flight marshals ignored, overlays disposed last).
                 this.attention.Dispose();
+                // SPEC-TRAY-015 M3: the owned settings form closes with the shell.
+                if (this.settingsForm != null && !this.settingsForm.IsDisposed)
+                {
+                    this.settingsForm.Dispose();
+                }
                 DisposeIcon();
                 if (this.menu != null)
                 {

@@ -24,15 +24,62 @@ namespace TerminalOrganizer.Core.Attention
         /// <summary>The ring thickness of the overlay in physical pixels (REQ-OVL-001).</summary>
         public const int RingThicknessPx = 6;
 
+        /// <summary>The organizer heartbeat cadence (REQ-HB-001): sits 3x inside the producer's 15 s window.</summary>
+        // @MX:NOTE: pinned constant (SPEC-TRAY-016 plan.md section J); changing the value is a SPEC amendment.
+        public const int HeartbeatIntervalMs = 5000;
+
         /// <summary>The amber ring color #FFBF00 (plan.md section J); the App overlay unpacks it into R/G/B.</summary>
         public const int RingColorRgb = 0xFFBF00;
+
+        // @MX:NOTE: SPEC-TRAY-016 message-constant block (plan.md section J): the pinned
+        // panel geometry/typography set — changing any value here is a SPEC amendment,
+        // never a tuning knob (the same doctrine as every constant above).
+        /// <summary>The rendered-text cap (REQ-MSG-001): verbatim up to this many characters,
+        /// then three fewer characters plus a single ellipsis (597 + one U+2026).</summary>
+        public const int MessageMaxChars = 600;
+
+        /// <summary>The panel font size in physical pixels, GraphicsUnit.Pixel (NFR-7: no point/DPI math).</summary>
+        public const int MessageFontPx = 14;
+
+        /// <summary>The panel inner padding on all sides.</summary>
+        public const int MessagePaddingPx = 10;
+
+        /// <summary>The amber left-stripe width; the stripe color is RingColorRgb.</summary>
+        public const int MessageAccentPx = 3;
+
+        /// <summary>The panel background #1E1E1E (near-black, solid — the panel has NO TransparencyKey).</summary>
+        public const int MessagePanelBackRgb = 0x1E1E1E;
+
+        /// <summary>The panel text #EEEEEE (near-white).</summary>
+        public const int MessageTextRgb = 0xEEEEEE;
+
+        /// <summary>The close-affordance glyph and hit-target size (AM-6: panel-only dismissal).</summary>
+        public const int MessageCloseSizePx = 16;
+
+        /// <summary>t11 (the 2026-11-01 UX round): the inside-right top inset — the message
+        /// card starts this far below the target's top edge, clear of the title bar and
+        /// tab strip, when the below placement would cross the work-area bottom.</summary>
+        public const int MessageTopInsetPx = 40;
+
+        /// <summary>t11 (the 2026-11-01 UX round): the minimum half-target column that may
+        /// host the inside-right card; a narrower right column falls back to inside-bottom
+        /// placement (full target width, one ring thickness above the bottom edge).</summary>
+        public const int MessageMinColumnPx = 280;
+
+        /// <summary>t13 (the 2026-11-01 UX round): the ask-kind text color (red on the
+        /// near-black card); info keeps the ring amber and every other kind the near-white
+        /// default (AttentionMessageStyle).</summary>
+        public const int MessageAskTextRgb = 0xE5484D;
     }
 
     /// <summary>
-    /// One parsed attention event (REQ-SIG-001): the recorded fields of one signal
-    /// payload. The needle is stored verbatim; notification_type is null unless the
-    /// producer provided one (logging only, never matching). Public fields so the
-    /// Pester suite reads them directly (the SettingsDto pattern).
+    /// One parsed attention event (REQ-SIG-001, extended SPEC-TRAY-016 REQ-FLD-001):
+    /// the recorded fields of one signal payload. The needle is stored verbatim;
+    /// notification_type is null unless the producer provided one (logging only, never
+    /// matching). The additive kind/message fields ride the same optional-string rule
+    /// (null when the key is absent, null, or non-string) so the producer may ship them
+    /// on its own schedule. Public fields so the Pester suite reads them directly (the
+    /// SettingsDto pattern).
     /// </summary>
     public sealed class AttentionSignal
     {
@@ -43,6 +90,17 @@ namespace TerminalOrganizer.Core.Attention
         public string Cwd;
         public string Needle;
         public string Timestamp;
+
+        /// <summary>The additive kind field (SPEC-TRAY-016 REQ-FLD-001): "ask" | "info" | "stop"
+        /// once the producer ships it, null when the key is absent, null, or non-string. Recorded
+        /// verbatim; the controller resolves the stop condition from it and degrades any
+        /// unrecognized non-null value as absent with one log line (D-5) — never a rejection.</summary>
+        public string Kind;
+
+        /// <summary>The additive message field (SPEC-TRAY-016 REQ-FLD-001): the producer's reply
+        /// first paragraph (at most 600 characters), null when the key is absent, null, or
+        /// non-string. Recorded verbatim at parse; panel rendering is M3 (REQ-MSG-001).</summary>
+        public string Message;
     }
 
     /// <summary>

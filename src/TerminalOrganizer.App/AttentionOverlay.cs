@@ -4,6 +4,7 @@ using System.Drawing;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using TerminalOrganizer.Core.Attention;
+using TerminalOrganizer.Core.Monitors;
 
 namespace TerminalOrganizer.App
 {
@@ -81,6 +82,19 @@ namespace TerminalOrganizer.App
         /// virtual desktop (the overlay stays alive; no-op when not supplied).</summary>
         public readonly System.Action<IntPtr> Hide;
 
+        /// <summary>SPEC-TRAY-016 (REQ-MSG-001): the panel-message seam. The controller
+        /// publishes the consumed signal's message before Create/Restart; the production
+        /// factory's panel twins read it (a non-renderable message is ring-only,
+        /// REQ-MSG-002). Suite factories get the no-op default and ignore it.</summary>
+        public readonly System.Action<string> SetPanelMessage;
+
+        /// <summary>t13 (the 2026-11-01 live-session round): the panel-kind seam. The
+        /// controller publishes the consumed signal's kind beside the message; the
+        /// production factory's panel twins read it to style the text color (ask red /
+        /// info amber / default near-white — AttentionMessageStyle). Suite factories
+        /// get the no-op default and ignore it.</summary>
+        public readonly System.Action<string> SetPanelKind;
+
         public AttentionOverlayFactory(System.Action<IntPtr, int[]> create,
             System.Action<IntPtr, int[]> restart, System.Action<IntPtr, int[]> tick,
             System.Action<IntPtr> stop)
@@ -91,6 +105,22 @@ namespace TerminalOrganizer.App
         public AttentionOverlayFactory(System.Action<IntPtr, int[]> create,
             System.Action<IntPtr, int[]> restart, System.Action<IntPtr, int[]> tick,
             System.Action<IntPtr> stop, System.Action<IntPtr> hide)
+            : this(create, restart, tick, stop, hide, null)
+        {
+        }
+
+        public AttentionOverlayFactory(System.Action<IntPtr, int[]> create,
+            System.Action<IntPtr, int[]> restart, System.Action<IntPtr, int[]> tick,
+            System.Action<IntPtr> stop, System.Action<IntPtr> hide,
+            System.Action<string> setPanelMessage)
+            : this(create, restart, tick, stop, hide, setPanelMessage, null)
+        {
+        }
+
+        public AttentionOverlayFactory(System.Action<IntPtr, int[]> create,
+            System.Action<IntPtr, int[]> restart, System.Action<IntPtr, int[]> tick,
+            System.Action<IntPtr> stop, System.Action<IntPtr> hide,
+            System.Action<string> setPanelMessage, System.Action<string> setPanelKind)
         {
             if (create == null) throw new ArgumentNullException("create");
             if (restart == null) throw new ArgumentNullException("restart");
@@ -101,6 +131,8 @@ namespace TerminalOrganizer.App
             Tick = tick;
             Stop = stop;
             Hide = hide ?? delegate(IntPtr target) { };
+            SetPanelMessage = setPanelMessage ?? delegate(string message) { };
+            SetPanelKind = setPanelKind ?? delegate(string kind) { };
         }
 
         /// <summary>
@@ -118,24 +150,121 @@ namespace TerminalOrganizer.App
         /// The SPEC-TRAY-014 form (the D-6 extension): the mode supplier is read at CREATION
         /// only, so SetTopmost affects new overlays while live ones keep their mode (spec 2.2).
         /// A null supplier behaves as constant false (the D-6 default).
+        /// SPEC-TRAY-016 (REQ-MSG-001) adds the PANEL twins riding the same handle-keyed
+        /// lifecycle: Create makes the ring plus a panel when the current signal carries a
+        /// renderable message, Restart re-measures and re-places the panel (dismissing it
+        /// when the new signal carries none), the off-desktop Hide hides both, Stop
+        /// disposes both, and the blink Tick still touches ONLY the ring — the panel never
+        /// toggles with the 1 Hz blink (its sole Tick-path contact is the desktop-gate
+        /// restore, a steady-state no-op).
         /// </summary>
         public static AttentionOverlayFactory Live(Func<bool> topmostMode)
         {
+            return Live(topmostMode, null);
+        }
+
+        /// <summary>
+        /// t10 (the 2026-11-01 live-session round): the desktop-aware production form.
+        /// The create/restart twins consult the virtual-desktop source AT ARRIVAL — a
+        /// target on ANOTHER desktop births its overlay HIDDEN (SeedHidden /
+        /// ShowPanelHidden; RestartHidden / RestartPanelHidden) instead of flashing
+        /// once before the first blink tick's desktop gate hides it. The tick's
+        /// existing gate reveals both on the first on-desktop tick (the
+        /// hide-but-keep-alive semantics reused at birth). The arrival gate is
+        /// fail-open like the controller's: a null source or a failed/indeterminate
+        /// query keeps the shown-at-arrival behavior.
+        /// </summary>
+        public static AttentionOverlayFactory Live(Func<bool> topmostMode, IDesktopSource desktops)
+        {
             Dictionary<long, AttentionOverlayForm> forms = new Dictionary<long, AttentionOverlayForm>();
+            Dictionary<long, AttentionMessagePanelForm> panels = new Dictionary<long, AttentionMessagePanelForm>();
+            string panelMessage = null;
+            string panelKind = null;
             Func<bool> mode = topmostMode ?? delegate { return false; };
             return new AttentionOverlayFactory(
                 delegate(IntPtr target, int[] rect)
                 {
                     AttentionOverlayForm form = new AttentionOverlayForm(target, rect, mode());
                     forms[target.ToInt64()] = form;
-                    form.ShowNoActivate();
+                    if (TargetOnCurrentDesktop(desktops, target))
+                    {
+                        form.ShowNoActivate();
+                    }
+                    else
+                    {
+                        form.SeedHidden();
+                    }
+                    // Panel twin (REQ-MSG-001/002): a panel exists only when the signal
+                    // carries a non-empty message — absent, null, or whitespace-only is
+                    // ring-only; no panel form is created. t10: an off-desktop arrival
+                    // births the card hidden with the ring.
+                    if (AttentionMessageText.IsRenderable(panelMessage))
+                    {
+                        AttentionMessagePanelForm panel = new AttentionMessagePanelForm(target, mode());
+                        panels[target.ToInt64()] = panel;
+                        if (TargetOnCurrentDesktop(desktops, target))
+                        {
+                            panel.ShowPanel(panelMessage, panelKind, rect);
+                        }
+                        else
+                        {
+                            panel.ShowPanelHidden(panelMessage, panelKind, rect);
+                        }
+                    }
                 },
                 delegate(IntPtr target, int[] rect)
                 {
                     AttentionOverlayForm form;
                     if (forms.TryGetValue(target.ToInt64(), out form) && form != null)
                     {
-                        form.Restart(rect);
+                        if (TargetOnCurrentDesktop(desktops, target))
+                        {
+                            form.Restart(rect);
+                        }
+                        else
+                        {
+                            form.RestartHidden(rect);
+                        }
+                    }
+                    // Panel twin: re-measure and re-place on the new signal's message —
+                    // or dismiss the panel when the new signal carries none. t10: an
+                    // off-desktop restart keeps the card hidden too.
+                    AttentionMessagePanelForm panel;
+                    if (panels.TryGetValue(target.ToInt64(), out panel))
+                    {
+                        if (panel != null && AttentionMessageText.IsRenderable(panelMessage))
+                        {
+                            if (TargetOnCurrentDesktop(desktops, target))
+                            {
+                                panel.RestartPanel(panelMessage, panelKind, rect);
+                            }
+                            else
+                            {
+                                panel.RestartPanelHidden(panelMessage, panelKind, rect);
+                            }
+                        }
+                        else
+                        {
+                            panels.Remove(target.ToInt64());
+                            if (panel != null)
+                            {
+                                panel.Close();
+                                panel.Dispose();
+                            }
+                        }
+                    }
+                    else if (AttentionMessageText.IsRenderable(panelMessage))
+                    {
+                        AttentionMessagePanelForm created = new AttentionMessagePanelForm(target, mode());
+                        panels[target.ToInt64()] = created;
+                        if (TargetOnCurrentDesktop(desktops, target))
+                        {
+                            created.ShowPanel(panelMessage, panelKind, rect);
+                        }
+                        else
+                        {
+                            created.ShowPanelHidden(panelMessage, panelKind, rect);
+                        }
                     }
                 },
                 delegate(IntPtr target, int[] rect)
@@ -144,6 +273,16 @@ namespace TerminalOrganizer.App
                     if (forms.TryGetValue(target.ToInt64(), out form) && form != null)
                     {
                         form.Tick(rect);
+                    }
+                    // The panel is NEVER a target of the ring's toggle (REQ-MSG-001: the
+                    // panel is STEADY while the ring blinks). Its sole Tick-path contact
+                    // is the desktop-gate restore below — a no-op bool check while the
+                    // target stays on the current desktop, so no per-tick panel work
+                    // exists at steady state; a user-closed panel stays closed.
+                    AttentionMessagePanelForm panel;
+                    if (panels.TryGetValue(target.ToInt64(), out panel) && panel != null)
+                    {
+                        panel.RestoreIfDesktopHidden();
                     }
                 },
                 delegate(IntPtr target)
@@ -158,6 +297,19 @@ namespace TerminalOrganizer.App
                             form.Dispose();
                         }
                     }
+                    // Panel twin: the panel dies with the overlay lifecycle regardless
+                    // (REQ-MSG-001) — every stop path (stop conditions, disable,
+                    // dispose) lands here.
+                    AttentionMessagePanelForm panel;
+                    if (panels.TryGetValue(target.ToInt64(), out panel))
+                    {
+                        panels.Remove(target.ToInt64());
+                        if (panel != null)
+                        {
+                            panel.Close();
+                            panel.Dispose();
+                        }
+                    }
                 },
                 delegate(IntPtr target)
                 {
@@ -166,7 +318,55 @@ namespace TerminalOrganizer.App
                     {
                         form.HideRing();
                     }
+                    // Panel twin: the same off-desktop gate hides both (REQ-MSG-001).
+                    AttentionMessagePanelForm panel;
+                    if (panels.TryGetValue(target.ToInt64(), out panel) && panel != null)
+                    {
+                        panel.HidePanel();
+                    }
+                },
+                delegate(string message)
+                {
+                    // The panel-message seam: the controller publishes the consumed
+                    // signal's message before Create/Restart (REQ-MSG-001); the twins
+                    // above read it. Ring-only factories get the no-op default.
+                    panelMessage = message;
+                },
+                delegate(string kind)
+                {
+                    // t13 (the 2026-11-01 live-session round): the panel-kind seam —
+                    // the controller publishes the consumed signal's kind beside the
+                    // message; the twins above read it for the text color.
+                    panelKind = kind;
                 });
+        }
+
+        /// <summary>
+        /// t10 (the 2026-11-01 live-session round): the fail-open arrival gate — true
+        /// (shown) for a null source or a failed/indeterminate query (the controller's
+        /// IsOnCurrentDesktop semantics), false only for a SUCCESSFUL off-desktop
+        /// answer, in which case the overlay is born hidden instead.
+        /// </summary>
+        private static bool TargetOnCurrentDesktop(IDesktopSource desktops, IntPtr target)
+        {
+            if (desktops == null)
+            {
+                return true;
+            }
+            DesktopFlagResult flag;
+            try
+            {
+                flag = desktops.IsWindowOnCurrentVirtualDesktop(target);
+            }
+            catch (Exception)
+            {
+                return true;
+            }
+            if (flag == null || !flag.Success)
+            {
+                return true;
+            }
+            return flag.Value;
         }
     }
 
@@ -271,6 +471,29 @@ namespace TerminalOrganizer.App
         {
             ringOn = false;
             Place(new int[] { 0, 0, 0, 0 }, SwpHideWindow | SwpNosize | SwpNomove);
+        }
+
+        /// <summary>
+        /// t10 (the 2026-11-01 live-session round): the hidden birth — the target arrived
+        /// on ANOTHER virtual desktop, so the ring never shows at creation (the pre-fix
+        /// behavior flashed it once until the first blink tick's desktop gate hid it).
+        /// ringOn is seeded FALSE (the HideRing state) so the FIRST on-desktop Tick's
+        /// toggle lands on visible; the form was never shown, so no hide call is needed.
+        /// </summary>
+        internal void SeedHidden()
+        {
+            ringOn = false;
+        }
+
+        /// <summary>
+        /// t10: the off-desktop restart twin — repositioned to the fresh rectangle like
+        /// Restart, but kept hidden with ringOn false (a visible ring hides now); the
+        /// first on-desktop tick reveals it.
+        /// </summary>
+        internal void RestartHidden(int[] rect)
+        {
+            ringOn = false;
+            Place(rect, SwpHideWindow);
         }
 
         /// <summary>The amber ring: four thickness-wide bars along the form edges.</summary>

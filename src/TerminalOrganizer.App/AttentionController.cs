@@ -57,18 +57,49 @@ namespace TerminalOrganizer.App
         private readonly List<AttentionSignal> pending = new List<AttentionSignal>();
         private bool enabled;
 
-        /// <summary>Per-overlay attention state: last quad, visible ticks, blink-limited flag.</summary>
+        /// <summary>Per-overlay attention state: last quad, visible ticks, stop condition.</summary>
         private sealed class OverlayState
         {
             public int[] LastQuad;
             public int VisibleTicks;
-            public bool BlinkLimited;
+            public StopCondition StopCondition;
         }
+
+        /// <summary>
+        /// SPEC-TRAY-016 (REQ-KIND-001..003): how THIS overlay's blink stops, derived at
+        /// creation and every restart from the signal. The kind axis governs only the stop
+        /// condition of an overlay already shown — the event-policy filter (all |
+        /// notifications | mixed) stays event-based and unchanged (the policy decides IF,
+        /// the kind decides HOW LONG).
+        /// </summary>
+        private enum StopCondition
+        {
+            /// <summary>The shipped conditions only (closed / foreground / minimized / moved); never counted, never capped.</summary>
+            UntilFocus,
+
+            /// <summary>The attentionStopBlinkLimit visible-tick count (the shipped fixed-count behavior).</summary>
+            FixedCount,
+
+            /// <summary>The attentionInfoVisibleSeconds visible-seconds cap (kind "info" only — AM-3's kind-scoped new behavior).</summary>
+            InfoSeconds
+        }
+
+        // SPEC-TRAY-016 (D-2/D-5): the closed kind token set. Anything else non-null degrades
+        // absent-equivalent with one log line per consumed signal — never a parse rejection (a
+        // future producer kind must never cause the organizer to drop an attention signal).
+        private const string KindAsk = "ask";
+        private const string KindInfo = "info";
+        private const string KindStop = "stop";
 
         // SPEC-TRAY-014 D-7/D-9 and the D-6 extension: the loaded options.
         private string eventPolicy;
         private int stopBlinkLimit;
         private bool topmostMode;
+
+        // SPEC-TRAY-016 (REQ-PREF-001, D-9): the info visible-seconds cap (SECONDS, distinct
+        // from the TICK-unit stopBlinkLimit — D-7's two axes). Defaults to the absent-key
+        // default at construction; SetInfoVisibleSeconds clamps like SetStopBlinkLimit.
+        private int infoVisibleSeconds;
         // Single-writer discipline: inFlight, pending and activeOverlays are mutated only
         // on the UI thread (the timer ticks and the marshalled completion) — the queue-work
         // thread never touches them, so no cross-thread fence is needed.
@@ -76,6 +107,14 @@ namespace TerminalOrganizer.App
         private bool disposed;
         private System.Windows.Forms.Timer pollTimer;
         private System.Windows.Forms.Timer blinkTimer;
+        // SPEC-TRAY-016 M1 (REQ-HB-001..003): the heartbeat timer (the AM-5 third slot,
+        // torn down after poll and blink), the injected write seam (one best-effort
+        // write per call returning success; production wires the AttentionHeartbeatWriter
+        // over the signal directory), and the consecutive-failure dedupe flag (one log
+        // line per failing run, silent until a write succeeds again — REQ-HB-002).
+        private System.Windows.Forms.Timer heartbeatTimer;
+        private readonly Func<bool> writeHeartbeat;
+        private bool heartbeatFailureLogged;
 
         /// <summary>
         /// The bare SPEC-TRAY-013 configuration: policy "all" — unlimited blinking for both
@@ -95,7 +134,8 @@ namespace TerminalOrganizer.App
         }
 
         /// <summary>SPEC-TRAY-014 options form (D-7/D-9, the D-6 extension): carries the
-        /// event policy, the stop blink limit and the always-on-top mode.</summary>
+        /// event policy, the stop blink limit and the always-on-top mode. The heartbeat
+        /// seam is null — no heartbeat writes (the pre-SPEC-TRAY-016 behavior).</summary>
         public AttentionController(Func<AttentionPollResult> pollSignals,
             Func<AttentionCandidate[]> probeWindows, Action<WaitCallback> queueWork,
             Action<Action> marshal, Func<IntPtr> getForegroundWindow,
@@ -103,6 +143,23 @@ namespace TerminalOrganizer.App
             Func<IntPtr, int[]> getTargetRect, AttentionOverlayFactory overlays,
             Action<string> logSink, IDesktopSource desktops, bool enabled,
             string eventPolicy, int stopBlinkLimit, bool topmostMode)
+            : this(pollSignals, probeWindows, queueWork, marshal, getForegroundWindow,
+                isWindowAlive, isWindowMinimized, getTargetRect, overlays, logSink, desktops,
+                enabled, eventPolicy, stopBlinkLimit, topmostMode, null)
+        {
+        }
+
+        /// <summary>SPEC-TRAY-016 M1 full form: the options plus the heartbeat write seam
+        /// (one best-effort write per call, returning success; production wires
+        /// AttentionHeartbeatWriter over the signal directory, the suite records).</summary>
+        public AttentionController(Func<AttentionPollResult> pollSignals,
+            Func<AttentionCandidate[]> probeWindows, Action<WaitCallback> queueWork,
+            Action<Action> marshal, Func<IntPtr> getForegroundWindow,
+            Func<IntPtr, bool> isWindowAlive, Func<IntPtr, bool> isWindowMinimized,
+            Func<IntPtr, int[]> getTargetRect, AttentionOverlayFactory overlays,
+            Action<string> logSink, IDesktopSource desktops, bool enabled,
+            string eventPolicy, int stopBlinkLimit, bool topmostMode,
+            Func<bool> writeHeartbeat)
         {
             if (pollSignals == null) throw new ArgumentNullException("pollSignals");
             if (probeWindows == null) throw new ArgumentNullException("probeWindows");
@@ -129,6 +186,8 @@ namespace TerminalOrganizer.App
             this.eventPolicy = AttentionPolicyResolver.Parse(eventPolicy);
             this.stopBlinkLimit = SettingsStore.ClampBlinkLimit(stopBlinkLimit);
             this.topmostMode = topmostMode;
+            this.infoVisibleSeconds = SettingsStore.DefaultInfoVisibleSeconds;
+            this.writeHeartbeat = writeHeartbeat;
         }
 
         /// <summary>
@@ -140,13 +199,19 @@ namespace TerminalOrganizer.App
         /// window exist (morning-checklist surface).
         /// </summary>
         internal static AttentionController CreateProduction(LogSink log, Control marshallingControl,
-            string signalDirectory, bool enabled, string eventPolicy, int stopBlinkLimit, bool topmost)
+            string signalDirectory, bool enabled, string eventPolicy, int stopBlinkLimit, bool topmost,
+            int infoVisibleSeconds)
         {
             AttentionSignalStore store = new AttentionSignalStore(signalDirectory,
                 delegate { return UtcNowEpochMs(); });
             AttentionController controller = null;
+            // t10 (the 2026-11-01 live-session round): one shared virtual-desktop reader
+            // feeds BOTH the controller's blink-tick gate and the factory's arrival gate
+            // (the create/restart twins birth an off-desktop target hidden).
+            VirtualDesktopReader desktopReader = new VirtualDesktopReader();
             AttentionOverlayFactory factory = AttentionOverlayFactory.Live(
-                delegate { return controller == null ? false : controller.TopmostMode; });
+                delegate { return controller == null ? false : controller.TopmostMode; },
+                desktopReader);
             controller = new AttentionController(
                 store.Poll,
                 new AttentionWindowProbe().Candidates,
@@ -158,12 +223,18 @@ namespace TerminalOrganizer.App
                 AttentionWindowProbe.TargetRect,
                 factory,
                 delegate(string line) { log.Append(line); },
-                new VirtualDesktopReader(),
-                enabled, eventPolicy, stopBlinkLimit, topmost);
+                desktopReader,
+                enabled, eventPolicy, stopBlinkLimit, topmost,
+                delegate { return AttentionHeartbeatWriter.Write(AttentionHeartbeatWriter.HeartbeatPath(signalDirectory)); });
+            // SPEC-TRAY-016 (REQ-PREF-001): the loaded info visible-seconds cap rides the
+            // same production wiring as the other attention options (clamped again).
+            controller.SetInfoVisibleSeconds(infoVisibleSeconds);
             return controller;
         }
 
-        /// <summary>Starts the two WinForms timers (poll then blink); production only — the suite drives the ticks.</summary>
+        /// <summary>Starts the three WinForms timers (poll, blink, then heartbeat — the AM-5
+        /// amended set) and writes the first heartbeat immediately (REQ-HB-001: one write
+        /// at start, then one per heartbeat tick); production only — the suite drives the ticks.</summary>
         public void Start()
         {
             if (disposed)
@@ -176,8 +247,13 @@ namespace TerminalOrganizer.App
             blinkTimer = new System.Windows.Forms.Timer();
             blinkTimer.Interval = AttentionConstants.BlinkIntervalMs;
             blinkTimer.Tick += delegate { BlinkTick(); };
+            heartbeatTimer = new System.Windows.Forms.Timer();
+            heartbeatTimer.Interval = AttentionConstants.HeartbeatIntervalMs;
+            heartbeatTimer.Tick += delegate { HeartbeatTick(); };
+            WriteHeartbeatOnce();
             pollTimer.Start();
             blinkTimer.Start();
+            heartbeatTimer.Start();
         }
 
         /// <summary>
@@ -204,6 +280,13 @@ namespace TerminalOrganizer.App
         public void SetStopBlinkLimit(int value)
         {
             stopBlinkLimit = SettingsStore.ClampBlinkLimit(value);
+        }
+
+        /// <summary>SPEC-TRAY-016 (REQ-PREF-001): runtime change of the info visible-seconds
+        /// cap (already-clamped ints expected; clamped again, the SetStopBlinkLimit pattern).</summary>
+        public void SetInfoVisibleSeconds(int value)
+        {
+            infoVisibleSeconds = SettingsStore.ClampInfoSeconds(value);
         }
 
         /// <summary>
@@ -257,6 +340,17 @@ namespace TerminalOrganizer.App
                 Log("attention: io error " + errors[i].FileName + ": " + errors[i].Message);
             }
             AttentionSignal[] signals = result.Accepted;
+            // SPEC-TRAY-016 (REQ-KIND-002, D-5): exactly one log line per consumed signal
+            // carrying an unrecognized non-null kind; the behavior degrades absent-equivalent
+            // either way (the additive-fields discipline — never a rejection).
+            for (int i = 0; i < signals.Length; i++)
+            {
+                if (IsUnknownKind(signals[i]))
+                {
+                    Log("attention: unknown kind \"" + signals[i].Kind + "\" (treated as absent) event="
+                        + signals[i].Event + " needle=\"" + signals[i].Needle + "\"");
+                }
+            }
             if (!enabled)
             {
                 for (int i = 0; i < signals.Length; i++)
@@ -341,13 +435,26 @@ namespace TerminalOrganizer.App
                     continue;
                 }
                 overlays.Tick(handle, rect);
-                if (pair.Value.BlinkLimited)
+                if (pair.Value.StopCondition == StopCondition.FixedCount)
                 {
-                    // @MX:NOTE: the blink-cycle counting site (A-4): one blink = ONE VISIBLE tick.
+                    // @MX:NOTE: the blink-cycle counting site (A-4, extended SPEC-TRAY-016): one blink = ONE VISIBLE tick.
                     pair.Value.VisibleTicks++;
                     if (pair.Value.VisibleTicks >= stopBlinkLimit)
                     {
                         CollectStop(ref stops, pair.Key, "blinklimit");
+                    }
+                }
+                else if (pair.Value.StopCondition == StopCondition.InfoSeconds)
+                {
+                    // @MX:NOTE: the info visible-seconds cap (SPEC-TRAY-016 REQ-KIND-003, AM-3): the SAME
+                    // counting site and the pinned visible-tick rule — the cap is ceil(seconds x 1000 /
+                    // BlinkIntervalMs) ticks; hidden off-desktop ticks pause (the desktop gate above
+                    // skipped them), a failed desktop check keeps the ring visible and counts (fix-B),
+                    // and a restart resets the count (ShowOverlays re-derives and zeroes it).
+                    pair.Value.VisibleTicks++;
+                    if (pair.Value.VisibleTicks >= InfoTickCap(infoVisibleSeconds))
+                    {
+                        CollectStop(ref stops, pair.Key, "infocap");
                     }
                 }
             }
@@ -357,6 +464,55 @@ namespace TerminalOrganizer.App
                 {
                     StopOverlay(stops[i].Key, stops[i].Value);
                 }
+            }
+        }
+
+        /// <summary>
+        /// One heartbeat tick (REQ-HB-001): one best-effort write. Failures degrade per
+        /// REQ-HB-002 — nothing throws, no other attention work is touched, exactly one
+        /// log line covers a consecutive failure run, and the retry on the next tick is
+        /// unconditional.
+        /// </summary>
+        public void HeartbeatTick()
+        {
+            if (disposed)
+            {
+                return;
+            }
+            WriteHeartbeatOnce();
+        }
+
+        /// <summary>
+        /// One best-effort heartbeat write (the Start write and every heartbeat tick):
+        /// a null seam writes nothing (the pre-SPEC-TRAY-016 constructors); a failure —
+        /// returned or thrown — logs one line for the FIRST failure of a consecutive run
+        /// and stays silent until a write succeeds again (the deduped line REQ-HB-002 pins).
+        /// </summary>
+        private void WriteHeartbeatOnce()
+        {
+            if (writeHeartbeat == null)
+            {
+                return;
+            }
+            bool success;
+            try
+            {
+                success = writeHeartbeat();
+            }
+            catch (Exception)
+            {
+                // The writer contract is best-effort (REQ-HB-002); a throwing seam is a failure.
+                success = false;
+            }
+            if (success)
+            {
+                heartbeatFailureLogged = false;
+                return;
+            }
+            if (!heartbeatFailureLogged)
+            {
+                heartbeatFailureLogged = true;
+                Log("attention: heartbeat write failed (will retry next tick)");
             }
         }
 
@@ -378,9 +534,11 @@ namespace TerminalOrganizer.App
         }
 
         /// <summary>
-        /// The pinned teardown order (REQ-CTL-001): stop the poll timer first, then the
-        /// blink timer, then ignore any still-in-flight marshalled completion (the disposed
-        /// flag), and dispose the overlays and their forms last.
+        /// The pinned teardown order (REQ-CTL-001, AM-5): stop the poll timer first, then
+        /// the blink timer, then the heartbeat timer, then ignore any still-in-flight
+        /// marshalled completion (the disposed flag), and dispose the overlays and their
+        /// forms last. organizer.json is NEVER deleted — staleness is the organizer-dead
+        /// signal the producer's fallback rides on (REQ-HB-003).
         /// </summary>
         public void Dispose()
         {
@@ -399,6 +557,12 @@ namespace TerminalOrganizer.App
                 blinkTimer.Stop();
                 blinkTimer.Dispose();
                 blinkTimer = null;
+            }
+            if (heartbeatTimer != null)
+            {
+                heartbeatTimer.Stop();
+                heartbeatTimer.Dispose();
+                heartbeatTimer = null;
             }
             disposed = true;
             List<long> handles = new List<long>(trackedOverlays.Keys);
@@ -544,10 +708,21 @@ namespace TerminalOrganizer.App
         /// window (D-3). D-10: creation seeds the last-seen quad and every restart re-seeds
         /// it, so the moved-stop compares against the quad the ring was last placed on.
         /// SPEC-TRAY-014 (A-5): a restart also RESETS the visible-tick count and ADOPTS the
-        /// new signal's event kind; a creation seeds both from its own signal.</summary>
+        /// new signal's event kind; a creation seeds both from its own signal. SPEC-TRAY-016
+        /// (REQ-KIND-003): the restart also ADOPTS the new signal's KIND — the stop condition
+        /// is re-derived from the new signal on every restart, in both directions.</summary>
         private void ShowOverlays(AttentionSignal signal, long[] matches)
         {
-            bool blinkLimited = IsBlinkLimited(signal);
+            // SPEC-TRAY-016 (REQ-MSG-001): publish this signal's message for the panel
+            // twins — the production factory reads it at Create/Restart (ring-only when
+            // absent, null, or whitespace, REQ-MSG-002; the suite factories' no-op
+            // default ignores it).
+            overlays.SetPanelMessage(signal == null ? null : signal.Message);
+            // t13 (the 2026-11-01 live-session round): the kind rides the same seam so
+            // the panel styles its text (ask red / info amber / default near-white —
+            // AttentionMessageStyle; the suite factories' no-op default ignores it).
+            overlays.SetPanelKind(signal == null ? null : signal.Kind);
+            StopCondition stopCondition = ResolveStopCondition(signal);
             for (int i = 0; i < matches.Length; i++)
             {
                 long handle = matches[i];
@@ -567,16 +742,75 @@ namespace TerminalOrganizer.App
                 }
                 state.LastQuad = rect;
                 state.VisibleTicks = 0;
-                state.BlinkLimited = blinkLimited;
+                state.StopCondition = stopCondition;
             }
         }
 
-        /// <summary>D-7 (REQ-CTL-002): only a stop-kind overlay under the mixed policy is blink-limited.</summary>
+        /// <summary>
+        /// SPEC-TRAY-016 kind resolution (REQ-KIND-001..003): the stop condition of an
+        /// overlay already shown, derived at creation and every restart. Truth table
+        /// (plan.md A-2 Fork 4): kind "ask" -> until focus (never counted, never capped);
+        /// kind "info" -> the visible-seconds cap (InfoSeconds); kind "stop" -> the fixed
+        /// visible-tick count; absent -> the shipped event x policy derivation below
+        /// (IsBlinkLimited — the kind axis is INERT while null, NEVER derived from the
+        /// event); unknown non-null -> absent-equivalent (PollTick already logged the line).
+        /// The one intended delta: kind "stop" under policy "all" is fixed-count — the
+        /// explicit kind replaces the mixed-only approximation.
+        /// </summary>
+        // @MX:NOTE: [AUTO] the stop-condition truth table (plan.md A-2 Fork 4, REQ-KIND-001..003); fan-in site (create + restart paths).
+        private StopCondition ResolveStopCondition(AttentionSignal signal)
+        {
+            string kind = signal == null ? null : signal.Kind;
+            if (kind != null)
+            {
+                if (string.Equals(kind, KindAsk, StringComparison.Ordinal))
+                {
+                    return StopCondition.UntilFocus;
+                }
+                if (string.Equals(kind, KindInfo, StringComparison.Ordinal))
+                {
+                    return StopCondition.InfoSeconds;
+                }
+                if (string.Equals(kind, KindStop, StringComparison.Ordinal))
+                {
+                    return StopCondition.FixedCount;
+                }
+            }
+            if (IsBlinkLimited(signal))
+            {
+                return StopCondition.FixedCount;
+            }
+            return StopCondition.UntilFocus;
+        }
+
+        /// <summary>SPEC-TRAY-016 (REQ-KIND-003, D-7): the seconds-to-visible-ticks conversion,
+        /// integer ceil form — 10 s at the 500 ms blink cadence is 20 visible ticks (the same
+        /// numeral 10 as the TICK-unit stop limit is coincidence; the axes are distinct).</summary>
+        private static int InfoTickCap(int seconds)
+        {
+            return (seconds * 1000 + AttentionConstants.BlinkIntervalMs - 1) / AttentionConstants.BlinkIntervalMs;
+        }
+
+        /// <summary>D-7 (REQ-CTL-002), unchanged: only a stop-kind EVENT under the mixed policy
+        /// is blink-limited — this is the ABSENT-kind derivation the kind axis falls back to.</summary>
         private bool IsBlinkLimited(AttentionSignal signal)
         {
             return string.Equals(eventPolicy, AttentionPolicyResolver.PolicyMixed, StringComparison.Ordinal)
                 && signal != null
                 && string.Equals(signal.Event, "stop", StringComparison.Ordinal);
+        }
+
+        /// <summary>SPEC-TRAY-016 (D-5): a non-null kind outside the closed token set.</summary>
+        private static bool IsUnknownKind(AttentionSignal signal)
+        {
+            string kind = signal == null ? null : signal.Kind;
+            if (kind == null)
+            {
+                return false;
+            }
+            return !string.Equals(kind, KindAsk, StringComparison.Ordinal)
+                && !string.Equals(kind, KindInfo, StringComparison.Ordinal)
+                && !string.Equals(kind, KindStop, StringComparison.Ordinal);
         }
 
         private void StopOverlay(long handle, string reason)
