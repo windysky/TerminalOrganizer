@@ -420,8 +420,11 @@ Describe 'AC-006 wiring and persistence guards (the M1 machinery ride-through)' 
             $_.Contains('@MX:NOTE') -and $_.Contains('M2-era constructor') }).Count) | Should Be 1
     }
 
-    It 'the shell builds the M2 era: both menu-build state constructions pass the radio-era flag' {
-        (@($script:IaCtxLines | Where-Object { $_.Contains('attentionRadioSubmenus: true') }).Count) | Should Be 2
+    It 'the shell builds the M2 era through the one shared state factory (AM-2 re-base, SPEC-TRAY-017)' {
+        # AM-2 (SPEC-TRAY-017): REQ-MENU-002's BuildMenuState factory carries the era
+        # literal exactly once; the menu build and the live update both route through it
+        # (the two callers structurally cannot disagree).
+        (@($script:IaCtxLines | Where-Object { $_.Contains('attentionRadioSubmenus: true') }).Count) | Should Be 1
     }
 
     It 'the policy click selects the row value directly: SaveAttentionEventPolicyTo, keep-open, no cycle advance, no rebuild' {
@@ -451,7 +454,7 @@ Describe 'AC-006 wiring and persistence guards (the M1 machinery ride-through)' 
     }
 
     It 'no new settings key: AppSettings still carries exactly the 18 shipped properties, schema 3' {
-        ([TerminalOrganizer.App.AppSettings].GetProperties().Count) | Should Be 18
+        ([TerminalOrganizer.App.AppSettings].GetProperties().Count) | Should Be 19
         $path = New-IaSettingsScratch $script:IaCarryBase
         try {
             (([TerminalOrganizer.App.SettingsStore]::new($path)).Load()).SchemaVersion | Should Be 3
@@ -461,7 +464,7 @@ Describe 'AC-006 wiring and persistence guards (the M1 machinery ride-through)' 
 
     It 'the keep-open partition is unchanged by the radio shape: still 26 members, radio kinds keep-open, sub-roots dismiss' {
         $names = @([Enum]::GetNames([TerminalOrganizer.App.TrayMenuEntryKind]))
-        $names.Count | Should Be 26
+        $names.Count | Should Be 28
         [TerminalOrganizer.App.TrayMenuBuilder]::IsKeepOpenKind([TerminalOrganizer.App.TrayMenuEntryKind]::AttentionEventPolicy) | Should Be $true
         [TerminalOrganizer.App.TrayMenuBuilder]::IsKeepOpenKind([TerminalOrganizer.App.TrayMenuEntryKind]::AttentionStopBlinks) | Should Be $true
         [TerminalOrganizer.App.TrayMenuBuilder]::IsKeepOpenKind([TerminalOrganizer.App.TrayMenuEntryKind]::AttentionRoot) | Should Be $false

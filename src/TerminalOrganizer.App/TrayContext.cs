@@ -670,6 +670,11 @@ namespace TerminalOrganizer.App
         private WindowSnapshot[] lastMenuSnapshots;
         // SPEC-TRAY-015 M3 (REQ-WIN-001): the single-instance settings-form reference.
         private SettingsForm settingsForm;
+        // SPEC-TRAY-020: the update checker, the app-log path handed to the detached
+        // helper (LogSink keeps its path private), and the one-shot startup-check timer.
+        private readonly UpdateChecker updateChecker;
+        private readonly string logPath;
+        private System.Windows.Forms.Timer startupUpdateTimer;
         private const string TopologyRerunSource = "topology-rerun";
 
         internal TrayShell()
@@ -691,6 +696,10 @@ namespace TerminalOrganizer.App
                 },
                 StartupShortcutPort.Default());
             this.log = new LogSink(string.IsNullOrEmpty(current.LogPath) ? SettingsStore.DefaultLogPath() : current.LogPath);
+            // SPEC-TRAY-020: the update checker over the same log; the log path is the
+            // helper's -LogPath argument (the detached helper appends to the app log).
+            this.logPath = string.IsNullOrEmpty(current.LogPath) ? SettingsStore.DefaultLogPath() : current.LogPath;
+            this.updateChecker = UpdateChecker.CreateProduction(this.log, UpdateChecker.DeriveRepoRoot());
             this.ports = Composition.Build(this.log, new LabelRegistry());
             this.ports.Balloon = delegate(NoticeMessage message) { ShowBalloon(message.Text, message.Level); };
             this.messageWindow = new HotkeyWindow(null);
@@ -738,6 +747,14 @@ namespace TerminalOrganizer.App
             RegisterConfiguredHotkey(current);
             // SPEC-TRAY-013: the poll and blink timers start once the shell is whole.
             this.attention.Start();
+            // SPEC-TRAY-020 D-6 (REQ-UPD-005): the one-shot delayed startup update check,
+            // armed only when the file-edit-only setting resolves true (absent = true).
+            // The check NEVER spawns the helper and never exits or restarts the app;
+            // ONLY a Behind outcome balloons (every other outcome logs its one line).
+            if (current.UpdateAutoCheckEnabled)
+            {
+                ArmStartupUpdateCheck();
+            }
             this.log.Append("tray shell started (hotkey " + current.Hotkey + ")");
         }
 
@@ -797,14 +814,11 @@ namespace TerminalOrganizer.App
             // REQ-UI-001: one row text per window (rank and provenance from this read's overrides and default rank).
             string[] rowTexts = RuleProvenance.RowTexts(discovered.Snapshots, current.PriorityOverrides,
                 current.TitleRules.DefaultRank);
-            // SPEC-TRAY-015 M2 (REQ-IA-001): the shell builds the radio-submenu era —
-            // Event policy and Stop blinks render as radio rows over the same bundle.
-            TrayMenuState state = new TrayMenuState(coordinator.IsBusy, current.Hotkey,
-                ports.Monitors.GetMonitors(), discovered.Snapshots, selector, resolution,
-                this.lastResultText, current.MergeEnabled, current.OverflowPolicy, rowTexts,
-                current.AttentionOverlay, current.AttentionEventPolicy,
-                current.AttentionStopBlinkLimit, current.AttentionOverlayTopmost,
-                attentionRadioSubmenus: true);
+            // SPEC-TRAY-015 M2 (REQ-IA-001) + SPEC-TRAY-017 (REQ-MENU-002): the shell
+            // builds the radio-submenu era through the ONE shared state factory — fresh
+            // monitors and row texts for the menu build (the cached resolution and
+            // snapshots were just seeded above, so the factory reads them directly).
+            TrayMenuState state = BuildMenuState(current, ports.Monitors.GetMonitors(), rowTexts);
             TrayMenuEntry[] entries = TrayMenuBuilder.Build(state);
             ContextMenuStrip built = new ContextMenuStrip();
             foreach (TrayMenuEntry entry in entries)
@@ -920,6 +934,16 @@ namespace TerminalOrganizer.App
                     // single-instance modeless settings form; the menu itself dismisses
                     // (the Settings kind keeps its DISMISS classification, REQ-STAY-004).
                     item.Click += delegate { ShowSettingsForm(); };
+                    break;
+                case TrayMenuEntryKind.CheckForUpdates:
+                    // SPEC-TRAY-020 (REQ-UPD-004): the read-only manual check — runs off
+                    // the UI thread, its outcome balloons through the existing surface.
+                    item.Click += delegate { RunUpdateCheckOnBackground(HandleManualUpdateCheckCompleted); };
+                    break;
+                case TrayMenuEntryKind.UpdateAndRestart:
+                    // SPEC-TRAY-020 (REQ-UPD-007): re-check, then spawn+exit / notice per
+                    // the decision. The row is only enabled while idle (D-7).
+                    item.Click += delegate { RunUpdateCheckOnBackground(HandleUpdateAndRestartCompleted); };
                     break;
                 case TrayMenuEntryKind.Exit:
                     item.Click += delegate { RequestApplicationExit(); };
@@ -1091,17 +1115,35 @@ namespace TerminalOrganizer.App
         /// <summary>The derivation state for one live update: the post-save settings
         /// joined with the last-open resolution and snapshots (spec 2.2 next-open
         /// refresh semantics). Built in the SAME M2 radio era as the menu build so the
-        /// live radio rows derive against the era that rendered them (REQ-IA-001).</summary>
+        /// live radio rows derive against the era that rendered them (REQ-IA-001);
+        /// SPEC-TRAY-017 (REQ-MENU-002): through the ONE shared state factory.</summary>
         private TrayMenuState MenuStateForLiveUpdate(AppSettings current)
+        {
+            return BuildMenuState(current, null, null);
+        }
+
+        /// <summary>
+        /// REQ-MENU-002 (SPEC-TRAY-017): the ONE shared TrayMenuState construction for
+        /// the menu build and the live update. The radio-era literal — the
+        /// attentionRadioSubmenus flag, always true here — lives in this one
+        /// construction, so the two callers structurally cannot disagree on the era
+        /// (the AM-2 count drops 2 -> 1). The genuinely-differing inputs are the
+        /// parameters — fresh monitors and row texts for the menu build, null/null for
+        /// the live update; the selector normalization, the cached last-open
+        /// resolution and snapshots (seeded by the menu build immediately before its
+        /// call), and the busy/result-text reads are common to both paths.
+        /// </summary>
+        // @MX:NOTE: [AUTO] the shared menu-state factory (SPEC-TRAY-017 REQ-MENU-002): menu build and live update flow through one construction carrying the radio-era flag exactly once.
+        private TrayMenuState BuildMenuState(AppSettings current, MonitorInfo[] monitors, string[] rowTexts)
         {
             ManagerSelector selector = current.ManagerSelector == null
                 ? ManagerSelector.None() : current.ManagerSelector;
             return new TrayMenuState(this.coordinator.IsBusy, current.Hotkey,
-                null, this.lastMenuSnapshots, selector, this.lastManagerResolution,
-                this.lastResultText, current.MergeEnabled, current.OverflowPolicy, null,
+                monitors, this.lastMenuSnapshots, selector, this.lastManagerResolution,
+                this.lastResultText, current.MergeEnabled, current.OverflowPolicy, rowTexts,
                 current.AttentionOverlay, current.AttentionEventPolicy,
                 current.AttentionStopBlinkLimit, current.AttentionOverlayTopmost,
-                attentionRadioSubmenus: true);
+                attentionRadioSubmenus: true, supportsUpdate: true);
         }
 
         /// <summary>Walks the live tree (the busy-flip shape): every settings-mutation
@@ -1801,6 +1843,136 @@ namespace TerminalOrganizer.App
                 prompt.AcceptButton = ok;
                 prompt.CancelButton = cancel;
                 return prompt.ShowDialog() == DialogResult.OK ? box.Text.Trim() : null;
+            }
+        }
+
+        /// <summary>
+        /// SPEC-TRAY-020 D-6 (REQ-UPD-005/006): arms the one-shot delayed startup check
+        /// on a WinForms timer (C3 — the only timer kind here). The tick stops the timer
+        /// and runs the check on a background thread; the shell constructor and menu
+        /// build NEVER wait on any git subprocess.
+        /// </summary>
+        // @MX:NOTE: [SPEC-TRAY-020] one-shot delayed startup check; behind-only notify (D-6), never a spawn or an exit.
+        private void ArmStartupUpdateCheck()
+        {
+            this.startupUpdateTimer = new System.Windows.Forms.Timer();
+            this.startupUpdateTimer.Interval = UpdateChecker.StartupCheckDelayMs;
+            this.startupUpdateTimer.Tick += delegate
+            {
+                this.startupUpdateTimer.Stop();
+                RunUpdateCheckOnBackground(HandleStartupUpdateCheckCompleted);
+            };
+            this.startupUpdateTimer.Start();
+        }
+
+        /// <summary>
+        /// SPEC-TRAY-020 (REQ-UPD-006): one check on a background thread; the outcome
+        /// marshals back through the message window (the C3 seam) — the UI thread never
+        /// blocks on git and no completion touches WinForms from the worker.
+        /// </summary>
+        private void RunUpdateCheckOnBackground(Action<UpdateCheckOutcome> completion)
+        {
+            ThreadPool.QueueUserWorkItem(delegate(object state)
+            {
+                UpdateCheckOutcome outcome = this.updateChecker.Check();
+                this.messageWindow.BeginInvoke(completion, new object[] { outcome });
+            });
+        }
+
+        /// <summary>SPEC-TRAY-020 D-6: the startup completion — ONLY a Behind outcome
+        /// balloons (the check already logged its one line on every path).</summary>
+        private void HandleStartupUpdateCheckCompleted(UpdateCheckOutcome outcome)
+        {
+            if (outcome != null && outcome.Kind == UpdateCheckOutcomeKind.Behind)
+            {
+                ShowBalloon(UpdateNotices.TextFor(outcome), UpdateNotices.LevelFor(outcome));
+            }
+        }
+
+        /// <summary>SPEC-TRAY-020 (REQ-UPD-004): the manual-check completion — every
+        /// outcome balloons with its section-J text and level (the in-flight null is
+        /// already logged and stays silent).</summary>
+        private void HandleManualUpdateCheckCompleted(UpdateCheckOutcome outcome)
+        {
+            if (outcome == null)
+            {
+                return;
+            }
+            ShowBalloon(UpdateNotices.TextFor(outcome), UpdateNotices.LevelFor(outcome));
+        }
+
+        /// <summary>
+        /// SPEC-TRAY-020 (REQ-UPD-007): the update-and-restart completion — on Behind the
+        /// detached helper is spawned FIRST and the app then exits through the pinned
+        /// sequence (spawn strictly before the exit; AC-011); every other outcome
+        /// surfaces its notice and neither spawns nor exits.
+        /// </summary>
+        // @MX:WARN: [AUTO] real exit+restart surface — spawn-before-exit order is AC-011; the pinned exit steps themselves are unedited.
+        // @MX:REASON: a spawn-after-exit or exit-without-spawn leaves the machine dark or the lock held.
+        private void HandleUpdateAndRestartCompleted(UpdateCheckOutcome outcome)
+        {
+            switch (UpdateDecision.For(outcome))
+            {
+                case UpdateDecisionAction.SpawnHelperAndExit:
+                    if (SpawnUpdateHelper())
+                    {
+                        RequestApplicationExit();
+                    }
+                    return;
+                case UpdateDecisionAction.AlreadyUpToDate:
+                    ShowBalloon(UpdateNotices.AlreadyUpToDateText, NoticeLevel.Information);
+                    return;
+                case UpdateDecisionAction.SurfaceReason:
+                    ShowBalloon(UpdateNotices.TextFor(outcome), UpdateNotices.LevelFor(outcome));
+                    return;
+                default:
+                    return;
+            }
+        }
+
+        /// <summary>
+        /// SPEC-TRAY-020 D-1 (REQ-UPD-009): spawns the detached repo-local helper through
+        /// the %SystemRoot%-rooted absolute powershell.exe with -NoProfile
+        /// -ExecutionPolicy Bypass -File, the four pinned parameters (repo root, exe
+        /// path, app PID, log path), CreateNoWindow, UseShellExecute=false. A child
+        /// process outlives its parent on Windows — the helper survives this app's exit
+        /// and waits out the exe lock itself. False (with the reason surfaced) when the
+        /// repo root is not a checkout or the start fails — the app then does not exit.
+        /// </summary>
+        private bool SpawnUpdateHelper()
+        {
+            try
+            {
+                string repoRoot = UpdateChecker.DeriveRepoRoot();
+                if (repoRoot == null)
+                {
+                    log.Append("update: helper not spawned: not a repo checkout");
+                    ShowBalloon("Update check failed (not a repo checkout). See the log for detail.", NoticeLevel.Error);
+                    return false;
+                }
+                string script = Path.Combine(repoRoot, "tools", "update-helper.ps1");
+                string exe = Process.GetCurrentProcess().MainModule.FileName;
+                int appPid = Process.GetCurrentProcess().Id;
+                string arguments = "-NoProfile -ExecutionPolicy Bypass -File \"" + script + "\""
+                    + " -RepoPath \"" + repoRoot + "\""
+                    + " -ExePath \"" + exe + "\""
+                    + " -AppPid " + appPid
+                    + " -LogPath \"" + this.logPath + "\"";
+                ProcessStartInfo start = new ProcessStartInfo(
+                    Environment.ExpandEnvironmentVariables(UpdateChecker.HelperPowerShellExe), arguments);
+                start.CreateNoWindow = true;
+                start.UseShellExecute = false;
+                using (Process helper = Process.Start(start))
+                {
+                    log.Append("update: helper spawned pid=" + (helper == null ? -1 : helper.Id));
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                log.Append("update: helper spawn failed: " + ex.Message);
+                ShowBalloon("Update check failed (helper did not start). See the log for detail.", NoticeLevel.Error);
+                return false;
             }
         }
 

@@ -223,4 +223,35 @@ namespace TerminalOrganizer.Core.Attention
 
         public string[] TabTitles { get { return (string[])tabTitles.Clone(); } }
     }
+
+    /// <summary>
+    /// One candidate window's match verdict (SPEC-TRAY-019 REQ-STM-005, plan.md A-2): whether
+    /// the window matched, the stripped session title that produced the match (null when
+    /// unmatched), the first raw non-session title whose normalized form contains every needle
+    /// token (recorded only when the window did not match — the would-have-rung evidence of a
+    /// suppressed over-match; null when none), and every stripped session title in evaluation
+    /// order (window title first, then tabs in input order) for the zero-match dump. Immutable;
+    /// the title array is copied on construction.
+    /// </summary>
+    public sealed class AttentionMatchDetail
+    {
+        public AttentionMatchDetail(long handle, bool matched, string matchedSessionTitle,
+            string suppressedTitle, string[] sessionTitles)
+        {
+            Handle = handle;
+            Matched = matched;
+            MatchedSessionTitle = matchedSessionTitle;
+            SuppressedTitle = suppressedTitle;
+            this.sessionTitles = sessionTitles == null ? new string[0] : (string[])sessionTitles.Clone();
+        }
+
+        public long Handle { get; private set; }
+        public bool Matched { get; private set; }
+        public string MatchedSessionTitle { get; private set; }
+        public string SuppressedTitle { get; private set; }
+
+        private readonly string[] sessionTitles;
+
+        public string[] SessionTitles { get { return (string[])sessionTitles.Clone(); } }
+    }
 }

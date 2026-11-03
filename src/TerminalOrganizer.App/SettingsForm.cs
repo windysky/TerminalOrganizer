@@ -34,9 +34,6 @@ namespace TerminalOrganizer.App
             AttentionPolicyResolver.PolicyNotifications
         };
 
-        /// <summary>The shipped stop-blink limits in the pinned order (the M2 radio rows' set).</summary>
-        private static readonly int[] BlinkLimits = new int[] { 5, 10, 20 };
-
         /// <summary>The overflow row value ids in the shipped order (the C3 rows; merge disabled by the release gate).</summary>
         private static readonly string[] OverflowRowIds = new string[] { "ask", "stackOnly", "merge", "moveLowest" };
 
@@ -111,7 +108,7 @@ namespace TerminalOrganizer.App
                 row.Top = 54;
                 row.CheckedChanged += delegate
                 {
-                    if (!this.suppressEvents && row.Checked)
+                    if (row.Checked)
                     {
                         ApplyAttentionPolicy(token);
                     }
@@ -128,17 +125,17 @@ namespace TerminalOrganizer.App
             attentionGroup.Controls.Add(blinkCaption);
 
             int[] blinkLefts = new int[] { 120, 162, 204 };
-            this.blinkRows = new RadioButton[BlinkLimits.Length];
-            for (int i = 0; i < BlinkLimits.Length; i++)
+            this.blinkRows = new RadioButton[AttentionBlinkLimits.Shipped.Length];
+            for (int i = 0; i < AttentionBlinkLimits.Shipped.Length; i++)
             {
-                int limit = BlinkLimits[i];
+                int limit = AttentionBlinkLimits.Shipped[i];
                 RadioButton row = new RadioButton();
                 row.AutoSize = true;
                 row.Left = blinkLefts[i];
                 row.Top = 84;
                 row.CheckedChanged += delegate
                 {
-                    if (!this.suppressEvents && row.Checked)
+                    if (row.Checked)
                     {
                         ApplyAttentionBlinkLimit(limit);
                     }
@@ -173,7 +170,7 @@ namespace TerminalOrganizer.App
                 row.Top = 26 + i * 24;
                 row.CheckedChanged += delegate
                 {
-                    if (!this.suppressEvents && row.Checked)
+                    if (row.Checked)
                     {
                         ApplyOverflowPolicy(id);
                     }
@@ -245,7 +242,7 @@ namespace TerminalOrganizer.App
                 {
                     TrayMenuEntry row = TrayMenuBuilder.DeriveSettingsEntry(
                         TrayMenuEntryKind.AttentionStopBlinks,
-                        BlinkLimits[i].ToString(CultureInfo.InvariantCulture), state);
+                        AttentionBlinkLimits.Shipped[i].ToString(CultureInfo.InvariantCulture), state);
                     this.blinkRows[i].Text = row.Label;
                     this.blinkRows[i].Checked = row.Checked;
                 }
@@ -341,6 +338,10 @@ namespace TerminalOrganizer.App
 
         private void ApplyAttentionPolicy(string token)
         {
+            if (this.suppressEvents)
+            {
+                return;
+            }
             TrayShell.SaveAttentionEventPolicyTo(this.settings, token);
             if (this.attention != null)
             {
@@ -352,6 +353,10 @@ namespace TerminalOrganizer.App
 
         private void ApplyAttentionBlinkLimit(int limit)
         {
+            if (this.suppressEvents)
+            {
+                return;
+            }
             TrayShell.SaveAttentionStopBlinksTo(this.settings, limit);
             if (this.attention != null)
             {
@@ -381,6 +386,10 @@ namespace TerminalOrganizer.App
 
         private void ApplyOverflowPolicy(string id)
         {
+            if (this.suppressEvents)
+            {
+                return;
+            }
             OverflowPolicy policy = TrayShell.ParsePolicyValue(id);
             TrayShell.SaveOverflowPolicyTo(this.settings, policy);
             this.log.Append("overflow policy set to " + policy);

@@ -32,6 +32,22 @@ namespace TerminalOrganizer.App
         private const int SwpHideWindow = 0x0080;
         private const int SwpNosize = 0x0001;
         private const int SwpNomove = 0x0002;
+        private const uint GwHwndPrev = 3;
+        private const uint SwpNozorder = 0x0004;
+
+        // SPEC-TRAY-018 (D-2): insertAfter for a card that must sit ABOVE the target —
+        // SetWindowPos inserts the positioned window DIRECTLY BELOW hWndInsertAfter, so
+        // the slot directly above the target belongs to the window currently directly
+        // above it. Zero (nothing above the target / dead handle) is HWND_TOP — the top
+        // of the non-topmost band, which is still above the target.
+        private static IntPtr AboveTargetInsertAfter(bool topmost, IntPtr target)
+        {
+            if (topmost)
+            {
+                return AttentionOverlayGeometry.InsertAfterFor(true, target);
+            }
+            return Native.GetWindow(target, GwHwndPrev);
+        }
 
         private readonly IntPtr target;
         private readonly bool topmostMode;
@@ -117,8 +133,7 @@ namespace TerminalOrganizer.App
             userClosed = false;
             desktopHidden = false;
             ApplyMessage(message, kind, targetRect);
-            Native.SetWindowPos(Handle, IntPtr.Zero, 0, 0, 0, 0,
-                (uint)(SwpNoactivate | SwpShowwindow | SwpNosize | SwpNomove));
+            ShowWindowNoActivate();
         }
 
         /// <summary>
@@ -154,8 +169,7 @@ namespace TerminalOrganizer.App
         internal void HidePanel()
         {
             desktopHidden = true;
-            Native.SetWindowPos(Handle, IntPtr.Zero, 0, 0, 0, 0,
-                (uint)(SwpNoactivate | SwpHideWindow | SwpNosize | SwpNomove));
+            HideWindowNoActivate();
         }
 
         /// <summary>
@@ -171,8 +185,30 @@ namespace TerminalOrganizer.App
                 return;
             }
             desktopHidden = false;
+            ShowWindowNoActivate();
+        }
+
+        /// <summary>
+        /// REQ-OVL-003 (SPEC-TRAY-017): the show flag-only reposition — one named helper
+        /// per flag combination (show / hide). Re-shows the window in place with no
+        /// activation, no move, no resize and no z-order change (SPEC-TRAY-018 D-3:
+        /// SWP_NOZORDER — "in place" includes the z band, so a restart-show or gate
+        /// restore never yanks the card to the top of the non-topmost band; NFR-7:
+        /// SWP_NOACTIVATE on every call).
+        /// </summary>
+        private void ShowWindowNoActivate()
+        {
             Native.SetWindowPos(Handle, IntPtr.Zero, 0, 0, 0, 0,
-                (uint)(SwpNoactivate | SwpShowwindow | SwpNosize | SwpNomove));
+                (uint)(SwpNoactivate | SwpShowwindow | SwpNosize | SwpNomove | SwpNozorder));
+        }
+
+        /// <summary>REQ-OVL-003 (SPEC-TRAY-017): the hide flag-only reposition — the
+        /// show helper's hide twin (SWP_HIDEWINDOW in place of SWP_SHOWWINDOW), equally
+        /// z-neutral (SPEC-TRAY-018 D-3: SWP_NOZORDER).</summary>
+        private void HideWindowNoActivate()
+        {
+            Native.SetWindowPos(Handle, IntPtr.Zero, 0, 0, 0, 0,
+                (uint)(SwpNoactivate | SwpHideWindow | SwpNosize | SwpNomove | SwpNozorder));
         }
 
         /// <summary>
@@ -225,7 +261,9 @@ namespace TerminalOrganizer.App
         /// height-independent, and the below-fit check only tightens with a taller
         /// card, so the branch is stable across the re-place). NFR-7: positioned ONLY
         /// through SetWindowPos carrying SWP_NOACTIVATE, z-ordered directly above the
-        /// target (the ring's insertAfter selection, matching its z-mode).
+        /// target (SPEC-TRAY-018 D-2: the neighbor-derived selector — SetWindowPos
+        /// places the positioned window directly below hWndInsertAfter, so the window
+        /// above the target is the slot that lands the card above it).
         /// </summary>
         private void ApplyMessage(string message, string kind, int[] targetRect)
         {
@@ -268,8 +306,15 @@ namespace TerminalOrganizer.App
                 surfaceWidth, measured.Height);
             closeGlyph = new Rectangle(place[2] - AttentionConstants.MessageCloseSizePx, 0,
                 AttentionConstants.MessageCloseSizePx, AttentionConstants.MessageCloseSizePx);
-            Native.SetWindowPos(Handle, AttentionOverlayGeometry.InsertAfterFor(topmostMode, target),
+            Native.SetWindowPos(Handle, AboveTargetInsertAfter(topmostMode, target),
                 place[0], place[1], place[2], place[3], (uint)SwpNoactivate);
+            // M2b (SPEC-TRAY-018): the panel never goes through Form.Show(), so the
+            // WinForms child-handle creation path never runs — probe-proven on the
+            // hidden-birth restore (the flag-only show leaves the TextBox with NO
+            // native handle, and Form.CreateControl() no-ops while the form is
+            // WinForms-invisible). Forcing the child's own handle gives the text a
+            // WS_VISIBLE native surface on every twin path; idempotent once created.
+            GC.KeepAlive(text.Handle);
         }
 
         /// <summary>
@@ -280,8 +325,7 @@ namespace TerminalOrganizer.App
         {
             userClosed = true;
             desktopHidden = false;
-            Native.SetWindowPos(Handle, IntPtr.Zero, 0, 0, 0, 0,
-                (uint)(SwpNoactivate | SwpHideWindow | SwpNosize | SwpNomove));
+            HideWindowNoActivate();
         }
 
         private void OnCloseAffordance(object sender, MouseEventArgs e)
@@ -317,6 +361,7 @@ namespace TerminalOrganizer.App
         {
             [DllImport("user32.dll", SetLastError = true)] public static extern bool SetWindowPos(IntPtr window, IntPtr insertAfter, int x, int y, int width, int height, uint flags); // every call passes SwpNoactivate (SWP_NOACTIVATE)
             [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr window, int command);
+            [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr GetWindow(IntPtr window, uint command);
         }
     }
 }

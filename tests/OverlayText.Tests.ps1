@@ -208,11 +208,21 @@ Describe 'AC-010 panel lifecycle, interaction model, ring purity' {
 
     # --- panel lifecycle twins: the collection seam (AttentionOverlay.cs Live factory) ---
 
-    It 'Create twin: a panel is created only when the signal message is renderable' {
+    It 'Create twin: a panel is created only when the signal message is renderable (AM-3 re-base, SPEC-TRAY-017)' {
         $b = Get-LiveRectDelegates
         $b.Count | Should Be 3
-        $b[0].Contains('IsRenderable(panelMessage)') | Should Be $true
-        $b[0].Contains('ShowPanel(') | Should Be $true
+        # AM-3 + AM-4 (SPEC-TRAY-017): each twin's delegate body invokes the ONE shared
+        # creation local; the local itself (at Live method scope) carries the renderable
+        # gate, the create-register pair, and the on-desktop show / hidden birth —
+        # exactly one creation path, structural.
+        $b[0].Contains('createPanelIfRenderable(target, rect);') | Should Be $true
+        $b[1].Contains('createPanelIfRenderable(target, rect);') | Should Be $true
+        $src = Read-Source $script:OverlayCsPath
+        $src.Contains('IsRenderable(panelMessage)') | Should Be $true
+        $src.Contains('new AttentionMessagePanelForm(target, mode());') | Should Be $true
+        $src.Contains('panels[target.ToInt64()] = panel;') | Should Be $true
+        $src.Contains('panel.ShowPanel(panelMessage, panelKind, rect);') | Should Be $true
+        $src.Contains('panel.ShowPanelHidden(panelMessage, panelKind, rect);') | Should Be $true
     }
 
     It 'Restart twin: the panel is re-measured and re-placed on restart' {
@@ -291,7 +301,11 @@ Describe 't10 hidden arrival: no wrong-desktop create/restart flash (2026-11-01 
         $b.Count | Should Be 3
         $b[0].Contains('ShowNoActivate()') | Should Be $true
         $b[0].Contains('SeedHidden(') | Should Be $true
-        $b[0].Contains('ShowPanelHidden(') | Should Be $true
+        # AM-4 re-base (SPEC-TRAY-017): the hidden birth now lives inside the shared
+        # creation local (one hidden-birth path, structurally shared by both twins);
+        # the ring-side pins above stay inline in the Create twin.
+        $src = Read-Source $script:OverlayCsPath
+        $src.Contains('panel.ShowPanelHidden(panelMessage, panelKind, rect);') | Should Be $true
     }
 
     It 'Live restart twin keeps an off-desktop restart hidden (RestartHidden/RestartPanelHidden)' {
@@ -436,13 +450,21 @@ Describe 't13 kind-styled centered text: ask red, info amber, default near-white
         $src.Contains('TextColorRgbForKind') | Should Be $true
     }
 
-    It 'controller publishes the kind on the panel seam (SetPanelKind)' {
+    It 'controller publishes message and kind through the one widened seam (AM-1 re-base, SPEC-TRAY-017)' {
+        # AM-1 (SPEC-TRAY-017): the two-kind-seam rows are superseded for the D-5
+        # single-seam publish — the widened SetPanelMessage carries BOTH arguments and
+        # the SetPanelKind call no longer exists.
         $src = Read-Source $script:ControllerCsPath
-        $src.Contains('overlays.SetPanelKind(') | Should Be $true
+        $src.Contains('overlays.SetPanelMessage(signal == null ? null : signal.Message, signal == null ? null : signal.Kind)') | Should Be $true
+        $src.Contains('overlays.SetPanelKind(') | Should Be $false
     }
 
-    It 'the factory carries the kind seam to the panel twins' {
+    It 'the factory carries the widened seam to the panel twins (AM-1 re-base, SPEC-TRAY-017)' {
+        # AM-1 (SPEC-TRAY-017): the publish delegate assigns message and kind together
+        # (one atomic publish point) and no SetPanelKind token remains in the factory.
         $src = Read-Source $script:OverlayCsPath
-        $src.Contains('SetPanelKind') | Should Be $true
+        $src.Contains('panelMessage = message;') | Should Be $true
+        $src.Contains('panelKind = kind;') | Should Be $true
+        $src.Contains('SetPanelKind') | Should Be $false
     }
 }

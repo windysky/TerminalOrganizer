@@ -156,24 +156,24 @@ Describe 'AC-001 stay-open classification (REQ-STAY-004)' {
         (($keep | Sort-Object) -join ',') | Should BeExactly (($expected | Sort-Object) -join ',')
     }
 
-    It 'the dismiss set is exactly the 18 remaining members (actions, manager navigation, informational)' {
+    It 'the dismiss set is exactly the 20 remaining members (actions, manager navigation, informational, update)' {
         $expectedDismiss = @('OrganizeUnderCursor', 'OrganizeMonitorRoot', 'OrganizeMonitor',
             'ManagerRoot', 'ManagerCurrent', 'ShowManager', 'ManagerCandidateGroup',
             'OverflowRoot', 'AttentionRoot', 'LabelsAndPrioritiesRoot', 'LabelWindow',
-            'LastResult', 'OpenLog', 'Settings', 'Exit', 'Version', 'Status', 'Separator')
+            'LastResult', 'OpenLog', 'Settings', 'CheckForUpdates', 'UpdateAndRestart', 'Exit', 'Version', 'Status', 'Separator')
         $dismiss = @([Enum]::GetNames([TerminalOrganizer.App.TrayMenuEntryKind]) |
             Where-Object { -not [TerminalOrganizer.App.TrayMenuBuilder]::IsKeepOpenKind([TerminalOrganizer.App.TrayMenuEntryKind]$_) })
-        $dismiss.Count | Should Be 18
+        $dismiss.Count | Should Be 20
         (($dismiss | Sort-Object) -join ',') | Should BeExactly (($expectedDismiss | Sort-Object) -join ',')
     }
 
-    It 'the partition is exhaustive over all 26 members: 8 keep-open + 18 dismiss, no member unclassified' {
+    It 'the partition is exhaustive over all 28 members: 8 keep-open + 20 dismiss, no member unclassified' {
         $names = @([Enum]::GetNames([TerminalOrganizer.App.TrayMenuEntryKind]))
-        $names.Count | Should Be 26
+        $names.Count | Should Be 28
         $keep = @($names | Where-Object { [TerminalOrganizer.App.TrayMenuBuilder]::IsKeepOpenKind([TerminalOrganizer.App.TrayMenuEntryKind]$_) })
         $dismiss = @($names | Where-Object { -not [TerminalOrganizer.App.TrayMenuBuilder]::IsKeepOpenKind([TerminalOrganizer.App.TrayMenuEntryKind]$_) })
         $keep.Count | Should Be 8
-        $dismiss.Count | Should Be 18
+        $dismiss.Count | Should Be 20
         ((@($keep) + @($dismiss) | Sort-Object) -join ',') | Should BeExactly (($names | Sort-Object) -join ',')
     }
 
@@ -299,7 +299,7 @@ Describe 'AC-002 save-helper reuse and carry-through (REQ-PERSIST-001)' {
     It 'no new settings key appears in the store DTO: AppSettings still carries exactly the 17 shipped properties, schema 3' {
         # Hand-derived from SettingsStore.cs: the 16 save-constructor fields plus the
         # computed HasTitleRules convenience property (the DTO's one non-persisted member).
-        ([TerminalOrganizer.App.AppSettings].GetProperties().Count) | Should Be 18
+        ([TerminalOrganizer.App.AppSettings].GetProperties().Count) | Should Be 19
         $path = New-StaySettingsScratch $script:StayCarryBase
         try {
             (([TerminalOrganizer.App.SettingsStore]::new($path)).Load()).SchemaVersion | Should Be 3

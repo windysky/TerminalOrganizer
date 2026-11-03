@@ -112,20 +112,21 @@ Describe 'AC-008 settings-row activation (REQ-WIN-001: the reserved row opens th
         $kinds[$slot + 1] | Should BeExactly 'Version'
     }
 
-    It 'the Settings row keeps its DISMISS classification (the REQ-STAY-004 partition is untouched by M3: 8 keep-open / 18 dismiss over all 26 members)' {
+    It 'the Settings row keeps its DISMISS classification (the REQ-STAY-004 partition is untouched by M3: 8 keep-open / 20 dismiss over all 28 members)' {
         # REQ-WIN-001: "the Settings kind's classification stays dismiss (the
         # menu closes; the form opens)". The full partition re-check is the
-        # M1/M2 inheritance (plan.md A-2 iteration-2 N1: 8/18 exhaustive).
+        # M1/M2 inheritance (plan.md A-2 iteration-2 N1: 8/18 exhaustive;
+        # SPEC-TRAY-020 AM re-base: 8/20 over 28).
         [TerminalOrganizer.App.TrayMenuBuilder]::IsKeepOpenKind(
             [TerminalOrganizer.App.TrayMenuEntryKind]::Settings) | Should Be $false
         $members = [enum]::GetNames([TerminalOrganizer.App.TrayMenuEntryKind])
-        $members.Count | Should Be 26
+        $members.Count | Should Be 28
         $keep = @($members | Where-Object { [TerminalOrganizer.App.TrayMenuBuilder]::IsKeepOpenKind(
             [TerminalOrganizer.App.TrayMenuEntryKind]::Parse([TerminalOrganizer.App.TrayMenuEntryKind], $_)) })
         $dismiss = @($members | Where-Object { -not [TerminalOrganizer.App.TrayMenuBuilder]::IsKeepOpenKind(
             [TerminalOrganizer.App.TrayMenuEntryKind]::Parse([TerminalOrganizer.App.TrayMenuEntryKind], $_)) })
         $keep.Count | Should Be 8
-        $dismiss.Count | Should Be 18
+        $dismiss.Count | Should Be 20
     }
 
     It 'the Settings row keeps its text and slot in every earlier constructor era (pre-attention, SPEC-TRAY-013 flat, SPEC-TRAY-014 cycle)' {
@@ -193,7 +194,7 @@ Describe 'AC-008 save routing (REQ-PERSIST-001: writes through the six existing 
     It 'no new settings key: AppSettings still carries exactly the 17 shipped properties, schemaVersion 3' {
         # The MenuStayOpen DTO pin, re-asserted post-M3 (REQ-PERSIST-001 binds
         # M1 and M3 equally; the 16 save-constructor fields + HasTitleRules).
-        ([TerminalOrganizer.App.AppSettings].GetProperties().Count) | Should Be 18
+        ([TerminalOrganizer.App.AppSettings].GetProperties().Count) | Should Be 19
         $scratch = Join-Path $here ('scratch-set-' + [Guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $scratch | Out-Null
         $path = Join-Path $scratch 'settings.json'

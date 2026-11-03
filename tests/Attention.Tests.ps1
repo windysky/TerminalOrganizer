@@ -263,13 +263,15 @@ function New-AttentionCandidate([long]$Handle, [string]$Title, [string[]]$Tabs) 
 
 function New-FixtureM {
     # The acceptance.md AC-004 candidate fixture, in the pinned input order.
+    # SPEC-TRAY-019 (plan.md A-4 AM-1a): matchable titles are launcher-prefixed session
+    # tabs; the path-shaped window titles of 4102/4106 stay as the incident-shape negatives.
     return @(
-        (New-AttentionCandidate 4101 'HG_ClaudeWSL2Notification' @('hooks', 'pwsh')),
-        (New-AttentionCandidate 4102 'claude ~ hooks' @()),
-        (New-AttentionCandidate 4103 'PowerShell' @('wsl2')),
+        (New-AttentionCandidate 4101 'HG_ClaudeWSL2Notification' @('HG_Hooks', 'HG_Pwsh')),
+        (New-AttentionCandidate 4102 'claude ~ hooks' @('HG_ClaudeHooks')),
+        (New-AttentionCandidate 4103 'PowerShell' @('HG_Wsl2')),
         (New-AttentionCandidate 4104 '' @()),
         (New-AttentionCandidate 4105 'HG_MyProject' @()),
-        (New-AttentionCandidate 4106 'dev hooks' @())
+        (New-AttentionCandidate 4106 'dev hooks' @('HG_DevHooks'))
     )
 }
 
@@ -337,14 +339,14 @@ Describe 'AC-004 Matcher (REQ-MAT-002)' {
         @{ Needle = 'claude notification wsl2'; Expected = '4101' },
         @{ Needle = 'claude'; Expected = '4101,4102' },
         @{ Needle = 'wsl2'; Expected = '4101,4103' },
-        @{ Needle = 'powershell'; Expected = '4103' },
+        @{ Needle = 'powershell'; Expected = '' },
         @{ Needle = 'pwsh'; Expected = '4101' },
         @{ Needle = 'notification'; Expected = '4101' },
         @{ Needle = 'hooks pwsh'; Expected = '' },
         @{ Needle = 'hooks claude'; Expected = '4102' },
         @{ Needle = 'hooks hooks'; Expected = '4101,4102,4106' },
         @{ Needle = 'Hooks'; Expected = '4101,4102,4106' },
-        @{ Needle = 'HG_MyProject'; Expected = '4105' },
+        @{ Needle = 'HG_MyProject'; Expected = '' },
         @{ Needle = 'myproject'; Expected = '4105' },
         @{ Needle = 'vhook'; Expected = '4106' },
         @{ Needle = 'dev hooks'; Expected = '4106' },
@@ -381,7 +383,7 @@ Describe 'AC-004 Matcher (REQ-MAT-002)' {
         $nullCandidates.Length | Should Be 0
     }
 
-    It '4104 never matches (empty title, no tabs) while 4105/4106 match on the title alone' {
+    It '4104 never matches (empty title, no tabs) while 4105 matches on the window title and 4106 on its session tab' {
         foreach ($needle in @('hooks', 'myproject', 'dev', 'zzzbad')) {
             $handles = [TerminalOrganizer.Core.Attention.AttentionMatcher]::Match($needle, (New-FixtureM))
             ($handles -contains 4104) | Should Be $false
@@ -670,7 +672,8 @@ Describe 'AC-007 Controller: poll, consume, suppression, log lines (REQ-CTL-001,
         $controller = New-AttentionTestController
         $script:NextPoll = New-AttentionTestPollResult @((New-AttentionTestSignal 'stop' 'hooks'))
         $controller.PollTick()
-        $script:AttentionLog.Count | Should Be 1
+        # SPEC-TRAY-019 AM-3: primary + one match line per matched window (hooks matches 4101/4102/4106).
+        $script:AttentionLog.Count | Should Be 4
         $script:AttentionLog[0] | Should BeExactly 'attention: event=stop needle="hooks" matched=3'
         ($script:FactoryCalls -join '|') | Should BeExactly 'create 4101|create 4102|create 4106'
         $script:MarshalCount | Should Be 1
@@ -695,7 +698,8 @@ Describe 'AC-007 Controller: poll, consume, suppression, log lines (REQ-CTL-001,
             @((New-AttentionTestSignal 'stop' 'pwsh')) `
             @((New-Object TerminalOrganizer.Core.Attention.AttentionRejectedFile -ArgumentList 'att-999999-z.json', 'version'))
         $controller.PollTick()
-        $script:AttentionLog.Count | Should Be 2
+        # SPEC-TRAY-019 AM-3: rejected + primary + one match line (pwsh matches 4101 only).
+        $script:AttentionLog.Count | Should Be 3
         $script:AttentionLog[0] | Should BeExactly 'attention: rejected att-999999-z.json: version'
         $script:AttentionLog[1] | Should BeExactly 'attention: event=stop needle="pwsh" matched=1'
     }
@@ -714,7 +718,9 @@ Describe 'AC-007 Controller: poll, consume, suppression, log lines (REQ-CTL-001,
         $controller = New-AttentionTestController
         $script:NextPoll = New-AttentionTestPollResult @((New-AttentionTestSignal 'stop' 'zzz'))
         $controller.PollTick()
-        $script:AttentionLog.Count | Should Be 1
+        # SPEC-TRAY-019 AM-3: primary + one no-match line per session-bearing window
+        # (the re-based fixture M has five: 4101/4102/4103/4105/4106).
+        $script:AttentionLog.Count | Should Be 6
         $script:AttentionLog[0] | Should BeExactly 'attention: event=stop needle="zzz" matched=0 (no window; taskbar flash remains)'
         $script:FactoryCalls.Count | Should Be 0
     }
@@ -805,7 +811,8 @@ Describe 'AC-008 Single-flight and coalescing (REQ-CTL-002)' {
         $script:AttentionLog[0] | Should BeExactly 'attention: match run failed: probe exploded'
         $script:NextPoll = New-AttentionTestPollResult @((New-AttentionTestSignal 'stop' 'hooks'))
         $controller.PollTick()
-        $script:AttentionLog.Count | Should Be 2
+        # SPEC-TRAY-019 AM-3: match-run-failed + primary + three match lines (hooks matches 4101/4102/4106).
+        $script:AttentionLog.Count | Should Be 5
         $script:AttentionLog[1] | Should BeExactly 'attention: event=stop needle="hooks" matched=3'
         $controller.Dispose()
     }
@@ -919,7 +926,9 @@ Describe 'AC-009 Overlay lifecycle, no time cap (REQ-CTL-004)' {
         (@($script:FactoryCalls | Where-Object { $_ -like 'create 4101' }).Count) | Should Be 1
         (@($script:FactoryCalls | Where-Object { $_ -like 'restart 4101' }).Count) | Should Be 1
         $script:AttentionLog[-1] | Should BeExactly 'attention: overlay restarted hwnd=4101'
-        $script:AttentionLog[-2] | Should BeExactly 'attention: event=notification needle="pwsh" matched=1'
+        # SPEC-TRAY-019 AM-3: the match detail line sits between the primary and the restart.
+        $script:AttentionLog[-2] | Should BeExactly 'attention: match hwnd=4101 session-tab="Pwsh"'
+        $script:AttentionLog[-3] | Should BeExactly 'attention: event=notification needle="pwsh" matched=1'
         # after the restart the overlay keeps blinking until a stop condition fires
         $controller.BlinkTick()
         (@($script:FactoryCalls | Where-Object { $_ -like 'tick 4101 *' }).Count) | Should Be 1

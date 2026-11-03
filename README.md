@@ -30,6 +30,17 @@ The first run shows a small welcome dialog explaining the hotkey and the tray-ov
 
 **Uninstall:** exit the app from the tray menu, then delete the folder. Settings are stored in `%LOCALAPPDATA%\TerminalOrganizer\settings.json` — delete that too for a fully clean removal.
 
+## Updating
+
+If you run the app from a **git repo checkout** (the repo folder with `.git`, with the app built into `bin\`), the app can update itself:
+
+- On startup (about 8 seconds after launch) it checks once against `origin/main`. When the checkout is behind, a balloon tells you how many commits — nothing else happens; the check never installs anything by itself. Turn it off with the `updateAutoCheckEnabled` settings key in `%LOCALAPPDATA%\TerminalOrganizer\settings.json` (default on).
+- In the tray menu, **Check for updates** runs the same read-only check on demand and reports the outcome: behind, ahead (unpushed local commits), diverged, or the failure reason. A diverged checkout is deliberately left for you to resolve in git — the app never resolves it for you.
+- **Update and restart** (when an update is available) closes the app, runs `git pull --ff-only origin main` through a detached helper script, and starts the app again. The pull is always fast-forward only — never force, never clean, never stash, so local work is never discarded. If the pull fails, the app still restarts on the old version and writes the reason to the log (**Open log** to see it).
+- One manual step to get started: a machine still on a version before the updater existed needs one last manual `git pull` — after that, **Update and restart** takes over.
+
+If you installed from the release zip, there is no git repository, so none of this applies: the app detects that and simply shows no update rows.
+
 ## Usage
 
 ### The hotkey
@@ -138,7 +149,7 @@ The first is the close drill (expects outcome `Merged`; the source closes only a
 
 ### Attention overlay
 
-When a Claude Code session running on the WSL side wants you to look at a terminal, it drops a signal file that names what to look for. The tray app then draws a blinking amber border over **every** Windows Terminal window whose title or tab titles match that signal — including matches hidden in inactive tabs, which are found through UI Automation. The border keeps blinking until you focus the window (or close / minimize it); there is no time limit, and the app never steals focus or brings the window to the foreground.
+When a Claude Code session running on the WSL side wants you to look at a terminal, it drops a signal file that names what to look for. The tray app then draws a blinking amber border over **every** Windows Terminal window whose *session* titles match that signal — a session title is a launcher-prefixed tab title such as `HG_NDResHub`, with the prefix stripped before matching. Plain path prompts and other unprefixed titles (window title or tabs) never match, so a needle like `ndreshub` no longer rings a window that merely has that folder open in a path tab; matches hidden in inactive tabs are still found through UI Automation. The border keeps blinking until you focus the window (or close / minimize it); there is no time limit, and the app never steals focus or brings the window to the foreground.
 
 While the tray app runs it also refreshes a heartbeat file (`organizer.json` in the same attention directory) every 5 seconds. A wsl-toast producer v1.5 or newer reads that heartbeat and, while it is fresh, skips its own OS toast and taskbar flash — the signal still arrives, and the overlay becomes the notification. If the organizer is not running (or stalls), the heartbeat goes stale and the producer falls back to toast and flash within about 15 seconds.
 

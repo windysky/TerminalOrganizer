@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text;
+using TerminalOrganizer.Core.Windows;
 
 namespace TerminalOrganizer.Core.Attention
 {
@@ -11,10 +12,17 @@ namespace TerminalOrganizer.Core.Attention
     /// rule was stricter than the producer and is withdrawn, plan.md A-3), and a title
     /// matches a needle when every whitespace-split needle token's normalized form
     /// occurs in the normalized title as an Ordinal substring. All tokens must co-occur
-    /// in ONE title (the window title or a single tab title). Pure by contract (NFR-2):
-    /// reads no file, clock or process, never throws.
+    /// in ONE title. SPEC-TRAY-019 (REQ-STM-001): the eligible titles are exactly the
+    /// candidate's SESSION titles — every title among its window title and tab titles
+    /// for which TitleNormalizer.Parse reports PrefixPresent — and the token rule
+    /// applies to the stripped SessionTitle; a title without a valid launcher prefix
+    /// never produces a match (a path tab legitimately contains session-name
+    /// substrings after normalization, and never rings its window). Pure by contract
+    /// (NFR-2, REQ-STM-007): reads no file, clock or process, never throws, and
+    /// obtains session titles solely through TitleNormalizer.Parse.
     /// </summary>
     // @MX:NOTE: this rule is the producer contract, replicated exactly; one deliberate divergence below.
+    // @MX:NOTE: SPEC-TRAY-019 session-title lens — grammar knowledge stays in TitleNormalizer (REQ-STM-007).
     public static class AttentionMatcher
     {
         /// <summary>
@@ -67,58 +75,96 @@ namespace TerminalOrganizer.Core.Attention
         }
 
         /// <summary>
-        /// The handles of every candidate whose window title, or at least one of its tab
-        /// titles, matches the needle (REQ-MAT-002) — deduplicated by handle, in the
-        /// candidates' input order. A null needle or candidate list yields an empty
-        /// result; never throws.
+        /// The handles of every candidate with at least one matching session title
+        /// (REQ-STM-001: the prefix-present titles of the window and its tabs, stripped) —
+        /// deduplicated by handle, in the candidates' input order. A thin handles-only
+        /// projection of MatchDetailed (the signature is pinned by the suites); a null
+        /// needle or candidate list yields an empty result; never throws.
         /// </summary>
         public static long[] Match(string needle, AttentionCandidate[] candidates)
         {
+            AttentionMatchDetail[] details = MatchDetailed(needle, candidates);
             List<long> handles = new List<long>();
+            for (int i = 0; i < details.Length; i++)
+            {
+                if (details[i].Matched && !handles.Contains(details[i].Handle))
+                {
+                    handles.Add(details[i].Handle);
+                }
+            }
+            return handles.ToArray();
+        }
+
+        /// <summary>
+        /// The per-candidate verdicts of one match run (SPEC-TRAY-019 REQ-STM-005 evidence
+        /// model, plan.md A-2): one detail per non-null candidate, in input order. The FIRST
+        /// eligible matching surface attributes the match reason (window title first, then
+        /// tabs in input order — deterministic). A needle of zero tokens matches nothing (the
+        /// pinned divergence) and suppresses nothing, but still reports session titles. Never
+        /// throws.
+        /// </summary>
+        // @MX:NOTE: SPEC-TRAY-019 MatchDetailed — the controller logs these verdicts as the plan.md A-3 detail lines.
+        public static AttentionMatchDetail[] MatchDetailed(string needle, AttentionCandidate[] candidates)
+        {
+            List<AttentionMatchDetail> results = new List<AttentionMatchDetail>();
             if (string.IsNullOrEmpty(needle) || candidates == null)
             {
-                return handles.ToArray();
+                return results.ToArray();
             }
             string[] tokens = NeedleTokens(needle);
-            if (tokens.Length == 0)
-            {
-                // Zero tokens: no match (the pinned divergence; the producer would match everything).
-                return handles.ToArray();
-            }
             foreach (AttentionCandidate candidate in candidates)
             {
                 if (candidate == null)
                 {
                     continue;
                 }
-                if (!TitleMatches(tokens, candidate.WindowTitle)
-                    && !AnyTabMatches(tokens, candidate.TabTitles))
-                {
-                    continue;
-                }
-                long handle = candidate.Handle.ToInt64();
-                if (!handles.Contains(handle))
-                {
-                    handles.Add(handle);
-                }
+                results.Add(EvaluateCandidate(tokens, candidate));
             }
-            return handles.ToArray();
+            return results.ToArray();
         }
 
-        private static bool AnyTabMatches(string[] tokens, string[] tabTitles)
+        /// <summary>Evaluates one candidate: session titles collected in order, first match attributed, first would-have-rung non-session title recorded when unmatched.</summary>
+        private static AttentionMatchDetail EvaluateCandidate(string[] tokens, AttentionCandidate candidate)
         {
-            if (tabTitles == null)
+            // Zero tokens: no match and no suppression (a token occurrence is only meaningful with tokens).
+            bool canMatch = tokens.Length > 0;
+            long handle = candidate.Handle.ToInt64();
+            string matchedSessionTitle = null;
+            string suppressedTitle = null;
+            List<string> sessionTitles = new List<string>();
+            EvaluateTitle(tokens, canMatch, candidate.WindowTitle, sessionTitles, ref matchedSessionTitle, ref suppressedTitle);
+            string[] tabTitles = candidate.TabTitles;
+            for (int i = 0; i < tabTitles.Length; i++)
             {
-                return false;
+                EvaluateTitle(tokens, canMatch, tabTitles[i], sessionTitles, ref matchedSessionTitle, ref suppressedTitle);
             }
-            foreach (string title in tabTitles)
+            bool matched = matchedSessionTitle != null;
+            if (matched)
             {
-                if (TitleMatches(tokens, title))
+                // A matched window has no suppressed over-match to report — its ring is correct.
+                suppressedTitle = null;
+            }
+            return new AttentionMatchDetail(handle, matched, matchedSessionTitle, suppressedTitle, sessionTitles.ToArray());
+        }
+
+        /// <summary>One title through the lens: a prefix-present title joins the session list and may attribute the match; a non-session title may attribute a suppression.</summary>
+        private static void EvaluateTitle(string[] tokens, bool canMatch, string title,
+            List<string> sessionTitles, ref string matchedSessionTitle, ref string suppressedTitle)
+        {
+            NormalizedTitle parsed = TitleNormalizer.Parse(title);
+            if (parsed.PrefixPresent)
+            {
+                sessionTitles.Add(parsed.SessionTitle);
+                if (canMatch && matchedSessionTitle == null && TitleMatches(tokens, parsed.SessionTitle))
                 {
-                    return true;
+                    matchedSessionTitle = parsed.SessionTitle;
                 }
+                return;
             }
-            return false;
+            if (canMatch && suppressedTitle == null && TitleMatches(tokens, title))
+            {
+                suppressedTitle = title;
+            }
         }
 
         /// <summary>Every token's normalized form occurs in the title's normalized form (Ordinal substring).</summary>

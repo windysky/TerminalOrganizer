@@ -82,18 +82,15 @@ namespace TerminalOrganizer.App
         /// virtual desktop (the overlay stays alive; no-op when not supplied).</summary>
         public readonly System.Action<IntPtr> Hide;
 
-        /// <summary>SPEC-TRAY-016 (REQ-MSG-001): the panel-message seam. The controller
-        /// publishes the consumed signal's message before Create/Restart; the production
-        /// factory's panel twins read it (a non-renderable message is ring-only,
-        /// REQ-MSG-002). Suite factories get the no-op default and ignore it.</summary>
-        public readonly System.Action<string> SetPanelMessage;
-
-        /// <summary>t13 (the 2026-11-01 live-session round): the panel-kind seam. The
-        /// controller publishes the consumed signal's kind beside the message; the
-        /// production factory's panel twins read it to style the text color (ask red /
-        /// info amber / default near-white — AttentionMessageStyle). Suite factories
-        /// get the no-op default and ignore it.</summary>
-        public readonly System.Action<string> SetPanelKind;
+        /// <summary>SPEC-TRAY-016 (REQ-MSG-001) widened by SPEC-TRAY-017 (REQ-OVL-002,
+        /// D-5): the ONE atomic panel publish seam. The controller publishes the
+        /// consumed signal's message AND kind together before Create/Restart; the
+        /// production factory's panel twins read the pair (a non-renderable message is
+        /// ring-only, REQ-MSG-002; the kind styles the text color — ask red / info
+        /// amber / default near-white, AttentionMessageStyle). One call carries both,
+        /// so no twin can observe a message paired with a different signal's kind.
+        /// Suite factories get the no-op default and ignore it.</summary>
+        public readonly System.Action<string, string> SetPanelMessage;
 
         public AttentionOverlayFactory(System.Action<IntPtr, int[]> create,
             System.Action<IntPtr, int[]> restart, System.Action<IntPtr, int[]> tick,
@@ -112,15 +109,7 @@ namespace TerminalOrganizer.App
         public AttentionOverlayFactory(System.Action<IntPtr, int[]> create,
             System.Action<IntPtr, int[]> restart, System.Action<IntPtr, int[]> tick,
             System.Action<IntPtr> stop, System.Action<IntPtr> hide,
-            System.Action<string> setPanelMessage)
-            : this(create, restart, tick, stop, hide, setPanelMessage, null)
-        {
-        }
-
-        public AttentionOverlayFactory(System.Action<IntPtr, int[]> create,
-            System.Action<IntPtr, int[]> restart, System.Action<IntPtr, int[]> tick,
-            System.Action<IntPtr> stop, System.Action<IntPtr> hide,
-            System.Action<string> setPanelMessage, System.Action<string> setPanelKind)
+            System.Action<string, string> setPanelMessage)
         {
             if (create == null) throw new ArgumentNullException("create");
             if (restart == null) throw new ArgumentNullException("restart");
@@ -131,8 +120,7 @@ namespace TerminalOrganizer.App
             Tick = tick;
             Stop = stop;
             Hide = hide ?? delegate(IntPtr target) { };
-            SetPanelMessage = setPanelMessage ?? delegate(string message) { };
-            SetPanelKind = setPanelKind ?? delegate(string kind) { };
+            SetPanelMessage = setPanelMessage ?? delegate(string message, string kind) { };
         }
 
         /// <summary>
@@ -181,6 +169,28 @@ namespace TerminalOrganizer.App
             string panelMessage = null;
             string panelKind = null;
             Func<bool> mode = topmostMode ?? delegate { return false; };
+            // REQ-OVL-001 (SPEC-TRAY-017): the ONE shared panel-creation path — the
+            // renderable gate, the create-register pair and the on-desktop show /
+            // hidden birth (t10). Both the Create twin and the Restart twin's
+            // create-on-miss branch invoke this local; no other path constructs a
+            // panel form.
+            System.Action<IntPtr, int[]> createPanelIfRenderable = delegate(IntPtr target, int[] rect)
+            {
+                if (!AttentionMessageText.IsRenderable(panelMessage))
+                {
+                    return;
+                }
+                AttentionMessagePanelForm panel = new AttentionMessagePanelForm(target, mode());
+                panels[target.ToInt64()] = panel;
+                if (TargetOnCurrentDesktop(desktops, target))
+                {
+                    panel.ShowPanel(panelMessage, panelKind, rect);
+                }
+                else
+                {
+                    panel.ShowPanelHidden(panelMessage, panelKind, rect);
+                }
+            };
             return new AttentionOverlayFactory(
                 delegate(IntPtr target, int[] rect)
                 {
@@ -194,23 +204,9 @@ namespace TerminalOrganizer.App
                     {
                         form.SeedHidden();
                     }
-                    // Panel twin (REQ-MSG-001/002): a panel exists only when the signal
-                    // carries a non-empty message — absent, null, or whitespace-only is
-                    // ring-only; no panel form is created. t10: an off-desktop arrival
-                    // births the card hidden with the ring.
-                    if (AttentionMessageText.IsRenderable(panelMessage))
-                    {
-                        AttentionMessagePanelForm panel = new AttentionMessagePanelForm(target, mode());
-                        panels[target.ToInt64()] = panel;
-                        if (TargetOnCurrentDesktop(desktops, target))
-                        {
-                            panel.ShowPanel(panelMessage, panelKind, rect);
-                        }
-                        else
-                        {
-                            panel.ShowPanelHidden(panelMessage, panelKind, rect);
-                        }
-                    }
+                    // Panel twin (REQ-MSG-001/002): through the shared creation local —
+                    // a panel exists only when the signal carries a renderable message.
+                    createPanelIfRenderable(target, rect);
                 },
                 delegate(IntPtr target, int[] rect)
                 {
@@ -253,18 +249,9 @@ namespace TerminalOrganizer.App
                             }
                         }
                     }
-                    else if (AttentionMessageText.IsRenderable(panelMessage))
+                    else
                     {
-                        AttentionMessagePanelForm created = new AttentionMessagePanelForm(target, mode());
-                        panels[target.ToInt64()] = created;
-                        if (TargetOnCurrentDesktop(desktops, target))
-                        {
-                            created.ShowPanel(panelMessage, panelKind, rect);
-                        }
-                        else
-                        {
-                            created.ShowPanelHidden(panelMessage, panelKind, rect);
-                        }
+                        createPanelIfRenderable(target, rect);
                     }
                 },
                 delegate(IntPtr target, int[] rect)
@@ -325,18 +312,13 @@ namespace TerminalOrganizer.App
                         panel.HidePanel();
                     }
                 },
-                delegate(string message)
+                delegate(string message, string kind)
                 {
-                    // The panel-message seam: the controller publishes the consumed
-                    // signal's message before Create/Restart (REQ-MSG-001); the twins
-                    // above read it. Ring-only factories get the no-op default.
+                    // The widened panel seam (SPEC-TRAY-017 REQ-OVL-002, D-5): ONE atomic
+                    // publish — the controller publishes the consumed signal's message
+                    // and kind together before Create/Restart (REQ-MSG-001 + t13); the
+                    // twins above read the pair. Ring-only factories get the no-op default.
                     panelMessage = message;
-                },
-                delegate(string kind)
-                {
-                    // t13 (the 2026-11-01 live-session round): the panel-kind seam —
-                    // the controller publishes the consumed signal's kind beside the
-                    // message; the twins above read it for the text color.
                     panelKind = kind;
                 });
         }

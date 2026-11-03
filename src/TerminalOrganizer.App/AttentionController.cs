@@ -437,25 +437,11 @@ namespace TerminalOrganizer.App
                 overlays.Tick(handle, rect);
                 if (pair.Value.StopCondition == StopCondition.FixedCount)
                 {
-                    // @MX:NOTE: the blink-cycle counting site (A-4, extended SPEC-TRAY-016): one blink = ONE VISIBLE tick.
-                    pair.Value.VisibleTicks++;
-                    if (pair.Value.VisibleTicks >= stopBlinkLimit)
-                    {
-                        CollectStop(ref stops, pair.Key, "blinklimit");
-                    }
+                    CountVisibleTick(ref stops, pair.Key, pair.Value, stopBlinkLimit, "blinklimit");
                 }
                 else if (pair.Value.StopCondition == StopCondition.InfoSeconds)
                 {
-                    // @MX:NOTE: the info visible-seconds cap (SPEC-TRAY-016 REQ-KIND-003, AM-3): the SAME
-                    // counting site and the pinned visible-tick rule — the cap is ceil(seconds x 1000 /
-                    // BlinkIntervalMs) ticks; hidden off-desktop ticks pause (the desktop gate above
-                    // skipped them), a failed desktop check keeps the ring visible and counts (fix-B),
-                    // and a restart resets the count (ShowOverlays re-derives and zeroes it).
-                    pair.Value.VisibleTicks++;
-                    if (pair.Value.VisibleTicks >= InfoTickCap(infoVisibleSeconds))
-                    {
-                        CollectStop(ref stops, pair.Key, "infocap");
-                    }
+                    CountVisibleTick(ref stops, pair.Key, pair.Value, InfoTickCap(infoVisibleSeconds), "infocap");
                 }
             }
             if (stops != null)
@@ -583,6 +569,26 @@ namespace TerminalOrganizer.App
         }
 
         /// <summary>
+        /// REQ-CTL-001 (SPEC-TRAY-017): the ONE shared stop-counting path for both capped
+        /// stop conditions — increment the visible-tick count, compare against the
+        /// caller's cap expression, and collect the stop with the caller's reason. The
+        /// cap expressions (stopBlinkLimit ticks; InfoTickCap(infoVisibleSeconds) =
+        /// ceil(seconds x 1000 / BlinkIntervalMs)) and the stop reasons ("blinklimit" /
+        /// "infocap") stay verbatim at the BlinkTick call sites (plan section J); a
+        /// no-cap condition (UntilFocus — the ask kind) never reaches this path.
+        /// </summary>
+        // @MX:NOTE: [AUTO] the unified blink-cycle counting site (A-4, extended SPEC-TRAY-016, unified SPEC-TRAY-017 REQ-CTL-001): one blink = ONE VISIBLE tick — hidden off-desktop ticks pause (the desktop gate skipped them), a failed desktop check keeps the ring visible and counts (fix-B), and a restart resets the count (ShowOverlays re-derives and zeroes it).
+        private static void CountVisibleTick(ref List<KeyValuePair<long, string>> stops, long handle,
+            OverlayState state, int cap, string reason)
+        {
+            state.VisibleTicks++;
+            if (state.VisibleTicks >= cap)
+            {
+                CollectStop(ref stops, handle, reason);
+            }
+        }
+
+        /// <summary>
         /// The desktop gate (post-audit fix B): true when the target is on the current
         /// virtual desktop (ring visible). False only for a SUCCESSFUL off-desktop answer —
         /// a failed or indeterminate query keeps the ring visible (today's behavior) with
@@ -666,10 +672,12 @@ namespace TerminalOrganizer.App
                     });
                     return;
                 }
-                long[][] matches = new long[signals.Length][];
+                AttentionMatchDetail[][] details = new AttentionMatchDetail[signals.Length][];
                 for (int i = 0; i < signals.Length; i++)
                 {
-                    matches[i] = AttentionMatcher.Match(signals[i].Needle, candidates);
+                    // SPEC-TRAY-019 (REQ-STM-005): the detailed verdicts feed the per-window
+                    // log lines; the matcher stays pure, so the worker thread is safe here.
+                    details[i] = AttentionMatcher.MatchDetailed(signals[i].Needle, candidates);
                 }
                 marshal(delegate
                 {
@@ -680,8 +688,9 @@ namespace TerminalOrganizer.App
                     inFlight = false;
                     for (int i = 0; i < signals.Length; i++)
                     {
-                        LogSignal(signals[i], matches[i]);
-                        ShowOverlays(signals[i], matches[i]);
+                        long[] matches = HandlesOf(details[i]);
+                        LogSignal(signals[i], details[i]);
+                        ShowOverlays(signals[i], matches);
                     }
                     if (pending.Count > 0)
                     {
@@ -691,17 +700,58 @@ namespace TerminalOrganizer.App
             });
         }
 
-        private void LogSignal(AttentionSignal signal, long[] matches)
+        /// <summary>The matched handles of one detail run — deduplicated by handle, input order (the Match projection).</summary>
+        private static long[] HandlesOf(AttentionMatchDetail[] details)
         {
+            List<long> handles = new List<long>();
+            for (int i = 0; i < details.Length; i++)
+            {
+                if (details[i].Matched && !handles.Contains(details[i].Handle))
+                {
+                    handles.Add(details[i].Handle);
+                }
+            }
+            return handles.ToArray();
+        }
+
+        private void LogSignal(AttentionSignal signal, AttentionMatchDetail[] details)
+        {
+            long[] matches = HandlesOf(details);
             if (matches.Length > 0)
             {
                 Log("attention: event=" + signal.Event + " needle=\"" + signal.Needle
                     + "\" matched=" + matches.Length.ToString(CultureInfo.InvariantCulture));
+                // SPEC-TRAY-019 (REQ-STM-005/006): additive per-window detail lines (plan.md A-3);
+                // the primary line above stays byte-identical. Lines exist only for this signal's
+                // matched windows and actually-suppressed over-matches — never per poll tick.
+                for (int i = 0; i < details.Length; i++)
+                {
+                    if (details[i].Matched)
+                    {
+                        Log("attention: match hwnd=" + details[i].Handle.ToString(CultureInfo.InvariantCulture)
+                            + " session-tab=\"" + details[i].MatchedSessionTitle + "\"");
+                    }
+                    else if (details[i].SuppressedTitle != null)
+                    {
+                        Log("attention: over-match suppressed hwnd=" + details[i].Handle.ToString(CultureInfo.InvariantCulture)
+                            + " non-session-title=\"" + details[i].SuppressedTitle + "\"");
+                    }
+                }
                 return;
             }
             // Zero-match (REQ-CTL-003): the producer's taskbar flash stays the fallback cue (D-1).
             Log("attention: event=" + signal.Event + " needle=\"" + signal.Needle
                 + "\" matched=0 (no window; taskbar flash remains)");
+            // SPEC-TRAY-019 (REQ-STM-005): one line per session-bearing window, naming its
+            // stripped session titles — the zero-match dump (plan.md A-3).
+            for (int i = 0; i < details.Length; i++)
+            {
+                if (details[i].SessionTitles.Length > 0)
+                {
+                    Log("attention: no-match hwnd=" + details[i].Handle.ToString(CultureInfo.InvariantCulture)
+                        + " session-tabs=\"" + string.Join("|", details[i].SessionTitles) + "\"");
+                }
+            }
         }
 
         /// <summary>REQ-CTL-004: one overlay per handle; an active handle restarts its blink
@@ -713,15 +763,13 @@ namespace TerminalOrganizer.App
         /// is re-derived from the new signal on every restart, in both directions.</summary>
         private void ShowOverlays(AttentionSignal signal, long[] matches)
         {
-            // SPEC-TRAY-016 (REQ-MSG-001): publish this signal's message for the panel
-            // twins — the production factory reads it at Create/Restart (ring-only when
-            // absent, null, or whitespace, REQ-MSG-002; the suite factories' no-op
-            // default ignores it).
-            overlays.SetPanelMessage(signal == null ? null : signal.Message);
-            // t13 (the 2026-11-01 live-session round): the kind rides the same seam so
-            // the panel styles its text (ask red / info amber / default near-white —
-            // AttentionMessageStyle; the suite factories' no-op default ignores it).
-            overlays.SetPanelKind(signal == null ? null : signal.Kind);
+            // SPEC-TRAY-016 (REQ-MSG-001) + t13, widened by SPEC-TRAY-017 (REQ-OVL-002,
+            // D-5): ONE atomic publish carries the consumed signal's message AND kind —
+            // the production factory reads both at Create/Restart (ring-only when the
+            // message is absent, null, or whitespace, REQ-MSG-002; the kind styles the
+            // text — ask red / info amber / default near-white, AttentionMessageStyle;
+            // the suite factories' no-op default ignores it).
+            overlays.SetPanelMessage(signal == null ? null : signal.Message, signal == null ? null : signal.Kind);
             StopCondition stopCondition = ResolveStopCondition(signal);
             for (int i = 0; i < matches.Length; i++)
             {

@@ -406,13 +406,15 @@ function New-OptionsCandidate([long]$Handle, [string]$Title, [string[]]$Tabs) {
 }
 
 function New-OptionsFixtureM {
+    # SPEC-TRAY-019 (plan.md A-4 AM-1b): re-based identically to fixture M (session tabs
+    # launcher-prefixed; the path-shaped window titles of 4102/4106 are the negatives).
     return @(
-        (New-OptionsCandidate 4101 'HG_ClaudeWSL2Notification' @('hooks', 'pwsh')),
-        (New-OptionsCandidate 4102 'claude ~ hooks' @()),
-        (New-OptionsCandidate 4103 'PowerShell' @('wsl2')),
+        (New-OptionsCandidate 4101 'HG_ClaudeWSL2Notification' @('HG_Hooks', 'HG_Pwsh')),
+        (New-OptionsCandidate 4102 'claude ~ hooks' @('HG_ClaudeHooks')),
+        (New-OptionsCandidate 4103 'PowerShell' @('HG_Wsl2')),
         (New-OptionsCandidate 4104 '' @()),
         (New-OptionsCandidate 4105 'HG_MyProject' @()),
-        (New-OptionsCandidate 4106 'dev hooks' @())
+        (New-OptionsCandidate 4106 'dev hooks' @('HG_DevHooks'))
     )
 }
 
@@ -538,7 +540,8 @@ Describe 'AC-004 Event policy filtering (REQ-CTL-001)' {
             (New-OptionsTestSignal 'stop' 'pwsh'), (New-OptionsTestSignal 'notification' 'hooks'))
         $controller.PollTick()
         $script:OptionsProbeCount | Should Be 1
-        $script:OptionsLog.Count | Should Be 2
+        # SPEC-TRAY-019 AM-3: suppression + primary + three match lines (hooks matches 4101/4102/4106).
+        $script:OptionsLog.Count | Should Be 5
         $script:OptionsLog[0] | Should BeExactly 'attention: suppressed (policy notifications) event=stop needle="pwsh"'
         $script:OptionsLog[1] | Should BeExactly 'attention: event=notification needle="hooks" matched=3'
         $controller.Dispose()

@@ -75,8 +75,10 @@ function New-KindCandidate([long]$Handle, [string]$Title, [string[]]$Tabs) {
 
 function New-KindFixture {
     # One candidate so needle "hooks" matches exactly one handle (4101): counts stay simple.
+    # SPEC-TRAY-019 (plan.md A-4 AM-1c): the tab is re-based to the launcher-prefixed
+    # session-tab shape; the stripped title Hooks keeps the one-handle invariant.
     return @(
-        (New-KindCandidate 4101 'HG_ClaudeWSL2Notification' @('hooks'))
+        (New-KindCandidate 4101 'HG_ClaudeWSL2Notification' @('HG_Hooks'))
     )
 }
 
@@ -497,7 +499,7 @@ Describe 'AC-008 settings key: default, clamp, five-value carry (REQ-PREF-001)' 
     }
 
     It 'AppSettings carries exactly the 18 shipped properties (the AM-4 re-based count)' {
-        ([TerminalOrganizer.App.AppSettings].GetProperties().Count) | Should Be 18
+        ([TerminalOrganizer.App.AppSettings].GetProperties().Count) | Should Be 19
     }
 
     It '(a) per-site guard: each of the three TrayContext save constructions carries AttentionInfoVisibleSeconds' {

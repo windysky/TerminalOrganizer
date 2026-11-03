@@ -48,6 +48,13 @@ namespace TerminalOrganizer.App
         LastResult,
         OpenLog,
         Settings,
+
+        /// <summary>SPEC-TRAY-020 D-7: the read-only manual update-check row (enabled regardless of busy).</summary>
+        CheckForUpdates,
+
+        /// <summary>SPEC-TRAY-020 D-7: the update-and-restart row (mutates everything; enabled only while idle).</summary>
+        UpdateAndRestart,
+
         Exit,
 
         /// <summary>Informational disabled product-version row (not flipped by the busy banner).</summary>
@@ -159,6 +166,20 @@ namespace TerminalOrganizer.App
     }
 
     /// <summary>
+    /// REQ-MENU-001 (SPEC-TRAY-017): the shipped stop-blink limit set {5, 10, 20}, pinned
+    /// order (plan section J) — defined exactly ONCE and consumed by both surfaces: the
+    /// menu's Stop blinks radio rows (BuildBlinkRadioChildren) and the settings form's
+    /// blink rows. Replaces the former independent definitions (menu string literals vs
+    /// the form's private int[]).
+    /// </summary>
+    // @MX:NOTE: [AUTO] the shared blink-limit set (SPEC-TRAY-017 REQ-MENU-001): one definition, two consumers (menu radio rows + settings form rows).
+    internal static class AttentionBlinkLimits
+    {
+        /// <summary>The shipped limits in the pinned order.</summary>
+        internal static readonly int[] Shipped = new int[] { 5, 10, 20 };
+    }
+
+    /// <summary>
     /// Everything one menu build needs (B2): the busy banner state, the hotkey display,
     /// the monitor set, the window snapshots (post label overlay), the persisted manager
     /// selector with its current resolution, the last organize summary, and the merge
@@ -181,6 +202,7 @@ namespace TerminalOrganizer.App
         private readonly int attentionStopBlinkLimit;
         private readonly bool attentionOverlayTopmost;
         private readonly bool attentionRadioSubmenus;
+        private readonly bool supportsUpdate;
         private readonly Dictionary<long, string> rowTexts;
 
         public TrayMenuState(bool busy, string hotkeyDisplay, MonitorInfo[] monitors, WindowSnapshot[] windows,
@@ -275,6 +297,28 @@ namespace TerminalOrganizer.App
             this.attentionRadioSubmenus = attentionRadioSubmenus;
         }
 
+        /// <summary>
+        /// SPEC-TRAY-020 form (D-7; REQ-UPD-012): the radio-era bundle plus the
+        /// update-era flag — "Check for updates" and "Update and restart" render between
+        /// Settings and Version. Check is read-only (enabled regardless of busy, the
+        /// Open log classification); Update and restart mutates everything (enabled only
+        /// while not busy); both DISMISS (the IsKeepOpenKind default-false). Every
+        /// earlier constructor era keeps its pinned root order (constructor-era scoping;
+        /// the AM re-base rows are the only suite edits this SPEC makes).
+        /// </summary>
+        // @MX:NOTE: [SPEC-TRAY-020 D-7] the update-era constructor — the two version-adjacent rows; pre-update eras render unchanged.
+        public TrayMenuState(bool busy, string hotkeyDisplay, MonitorInfo[] monitors, WindowSnapshot[] windows,
+            ManagerSelector managerSelector, ManagerResolution managerResolution, string lastResultText,
+            bool mergeMenuEnabled, OverflowPolicy overflowPolicy, string[] windowRowTexts,
+            bool attentionOverlay, string attentionEventPolicy, int attentionStopBlinkLimit,
+            bool attentionOverlayTopmost, bool attentionRadioSubmenus, bool supportsUpdate)
+            : this(busy, hotkeyDisplay, monitors, windows, managerSelector, managerResolution,
+                lastResultText, mergeMenuEnabled, overflowPolicy, windowRowTexts, attentionOverlay,
+                attentionEventPolicy, attentionStopBlinkLimit, attentionOverlayTopmost, attentionRadioSubmenus)
+        {
+            this.supportsUpdate = supportsUpdate;
+        }
+
         private TrayMenuState(bool busy, string hotkeyDisplay, MonitorInfo[] monitors, WindowSnapshot[] windows,
             ManagerSelector managerSelector, ManagerResolution managerResolution, string lastResultText,
             bool mergeMenuEnabled, OverflowPolicy overflowPolicy, string[] windowRowTexts,
@@ -327,6 +371,9 @@ namespace TerminalOrganizer.App
 
         /// <summary>True when this state carries the SPEC-TRAY-015 M2 radio-submenu era flag: Event policy and Stop blinks render as radio submenus (REQ-IA-001).</summary>
         public bool HasAttentionRadioSubmenus { get { return attentionRadioSubmenus; } }
+
+        /// <summary>True when this state is SPEC-TRAY-020 update-era: the check/update rows render between Settings and Version (D-7).</summary>
+        public bool SupportsUpdate { get { return supportsUpdate; } }
 
         /// <summary>The SPEC-TRAY-014 event policy; mixed outside the options era.</summary>
         public string AttentionEventPolicy
@@ -450,6 +497,19 @@ namespace TerminalOrganizer.App
             // window; the menu closes) are unchanged; M3 touches only the enabled flag
             // and the TrayContext click wiring.
             entries.Add(new TrayMenuEntry(TrayMenuEntryKind.Settings, "Settings…", true, false, null, null, null, null));
+            // SPEC-TRAY-020 D-7 (REQ-UPD-012): era-scoped update rows, version-adjacent,
+            // between Settings and Version — "Check for updates" is read-only (enabled
+            // regardless of busy, the Open log classification) while "Update and
+            // restart" mutates everything (enabled only while idle). Both DISMISS (the
+            // IsKeepOpenKind default; no edit needed). Pre-update constructors keep
+            // their pinned shapes — the three root-order rows pass unedited.
+            if (state.SupportsUpdate)
+            {
+                entries.Add(new TrayMenuEntry(TrayMenuEntryKind.CheckForUpdates, "Check for updates",
+                    true, false, null, null, null, null));
+                entries.Add(new TrayMenuEntry(TrayMenuEntryKind.UpdateAndRestart, "Update and restart",
+                    !busy, false, null, null, null, null));
+            }
             entries.Add(new TrayMenuEntry(TrayMenuEntryKind.Version, AppVersion.DisplayName, false, false, null, null, null, null));
             entries.Add(new TrayMenuEntry(TrayMenuEntryKind.Exit, "Exit", true, false, null, null, null, null));
             return entries.ToArray();
@@ -952,16 +1012,18 @@ namespace TerminalOrganizer.App
             };
         }
 
-        /// <summary>The Stop blinks radio rows (M2): the three shipped limits in the pinned
-        /// cycle's order, each rendered through the shared derivation (exactly-one-checked).</summary>
+        /// <summary>The Stop blinks radio rows (M2): the shared limit set (REQ-MENU-001,
+        /// SPEC-TRAY-017) in the pinned cycle's order, each rendered through the shared
+        /// derivation (exactly-one-checked).</summary>
         private static TrayMenuEntry[] BuildBlinkRadioChildren(TrayMenuState state)
         {
-            return new TrayMenuEntry[]
+            TrayMenuEntry[] rows = new TrayMenuEntry[AttentionBlinkLimits.Shipped.Length];
+            for (int i = 0; i < rows.Length; i++)
             {
-                DeriveSettingsEntry(TrayMenuEntryKind.AttentionStopBlinks, "5", state),
-                DeriveSettingsEntry(TrayMenuEntryKind.AttentionStopBlinks, "10", state),
-                DeriveSettingsEntry(TrayMenuEntryKind.AttentionStopBlinks, "20", state)
-            };
+                rows[i] = DeriveSettingsEntry(TrayMenuEntryKind.AttentionStopBlinks,
+                    AttentionBlinkLimits.Shipped[i].ToString(CultureInfo.InvariantCulture), state);
+            }
+            return rows;
         }
 
         /// <summary>The display name of one policy token (the raw token as the fallback).</summary>

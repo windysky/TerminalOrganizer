@@ -1,6 +1,7 @@
 using System;
 using System.Globalization;
 using System.IO;
+using System.Text;
 
 namespace TerminalOrganizer.App
 {
@@ -35,7 +36,7 @@ namespace TerminalOrganizer.App
                 }
                 File.AppendAllText(path,
                     DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)
-                    + " " + line + Environment.NewLine);
+                    + " " + Sanitize(line) + Environment.NewLine);
             }
             catch
             {
@@ -46,6 +47,45 @@ namespace TerminalOrganizer.App
         /// <summary>Write-through sink: nothing to flush. Present for the exit sequence (REQ-SHELL-003).</summary>
         public void Flush()
         {
+        }
+
+        // @MX:NOTE: [AUTO] REQ-LOG-001/002 (SPEC-TRAY-017): the D-2 sink-once line-structure mapping.
+        // CR and LF each render as their two-character literal escapes \r and \n (greppable, reversible
+        // by eye); every other C0 control character except TAB, plus DEL, renders as U+FFFD; all
+        // remaining content passes through verbatim. Called only from Append so every log writer
+        // (window titles, attention Kind/Needle diagnostics, everything) is covered with no
+        // per-callsite escaping (REQ-LOG-003 / D-1).
+        private static string Sanitize(string line)
+        {
+            if (line == null)
+            {
+                return string.Empty;
+            }
+            StringBuilder builder = new StringBuilder(line.Length);
+            for (int i = 0; i < line.Length; i++)
+            {
+                char c = line[i];
+                if (c == '\r')
+                {
+                    builder.Append("\\r");
+                }
+                else if (c == '\n')
+                {
+                    builder.Append("\\n");
+                }
+                else if ((c < ' ' && c != '\t') || c == '\u007F')
+                {
+                    // (char)0xFFFD keeps this source pure ASCII: a literal U+FFFD character
+                    // would fail the build on a machine whose default codepage is not UTF-8
+                    // (csc reads BOM-less sources with the system ANSI codepage).
+                    builder.Append((char)0xFFFD);
+                }
+                else
+                {
+                    builder.Append(c);
+                }
+            }
+            return builder.ToString();
         }
     }
 }

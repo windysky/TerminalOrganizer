@@ -41,6 +41,7 @@ namespace TerminalOrganizer.App
         private readonly int attentionStopBlinkLimit;
         private readonly bool attentionOverlayTopmost;
         private readonly int attentionInfoVisibleSeconds;
+        private readonly bool updateAutoCheckEnabled;
 
         public AppSettings(string hotkey, string logPath, string managerWindowName)
             : this(hotkey, logPath, managerWindowName, false)
@@ -154,6 +155,8 @@ namespace TerminalOrganizer.App
         /// value — the info visible-seconds cap (already clamped 1..120 by the loader).
         /// Every mid-chain constructor and FirstRunDialog's form inherit the 10 s default
         /// by construction, so no new store.Save site appears (the count stays 6).
+        /// SPEC-TRAY-020: this form now inherits the update auto-check default TRUE through
+        /// the full-tail form below (REQ-UPD-013), so every legacy call site keeps working.
         /// </summary>
         public AppSettings(string hotkey, string logPath, string managerWindowName, bool mergeEnabled,
             bool firstRunCompleted, bool startWithWindows, ManagerSelector managerSelector,
@@ -161,6 +164,25 @@ namespace TerminalOrganizer.App
             bool crossMonitorRedistribution, TitleRulesSettings titleRules, bool attentionOverlay,
             string attentionEventPolicy, int attentionStopBlinkLimit, bool attentionOverlayTopmost,
             int attentionInfoVisibleSeconds)
+            : this(hotkey, logPath, managerWindowName, mergeEnabled, firstRunCompleted, startWithWindows,
+                managerSelector, priorityOverrides, schemaVersion, overflowPolicy, crossMonitorRedistribution,
+                titleRules, attentionOverlay, attentionEventPolicy, attentionStopBlinkLimit,
+                attentionOverlayTopmost, attentionInfoVisibleSeconds, true)
+        {
+        }
+
+        /// <summary>
+        /// SPEC-TRAY-020 full-tail form (REQ-UPD-013): also carries the startup update
+        /// auto-check switch. The 18-argument form above (and through it every mid-chain
+        /// constructor and every legacy caller) inherits TRUE by construction — the D-8
+        /// absent-key default — so no call site changes and no new store.Save site appears.
+        /// </summary>
+        public AppSettings(string hotkey, string logPath, string managerWindowName, bool mergeEnabled,
+            bool firstRunCompleted, bool startWithWindows, ManagerSelector managerSelector,
+            PriorityOverride[] priorityOverrides, int schemaVersion, OverflowPolicy overflowPolicy,
+            bool crossMonitorRedistribution, TitleRulesSettings titleRules, bool attentionOverlay,
+            string attentionEventPolicy, int attentionStopBlinkLimit, bool attentionOverlayTopmost,
+            int attentionInfoVisibleSeconds, bool updateAutoCheckEnabled)
         {
             this.titleRules = titleRules;
             this.MergeEnabled = mergeEnabled;
@@ -180,6 +202,7 @@ namespace TerminalOrganizer.App
             this.attentionStopBlinkLimit = attentionStopBlinkLimit;
             this.attentionOverlayTopmost = attentionOverlayTopmost;
             this.attentionInfoVisibleSeconds = attentionInfoVisibleSeconds;
+            this.updateAutoCheckEnabled = updateAutoCheckEnabled;
         }
 
         public string Hotkey { get { return hotkey; } }
@@ -236,6 +259,11 @@ namespace TerminalOrganizer.App
         /// load; absent-key and every constructor default is 10 seconds (D-9) — a SECONDS axis,
         /// never the tick-unit AttentionStopBlinkLimit.</summary>
         public int AttentionInfoVisibleSeconds { get { return attentionInfoVisibleSeconds; } }
+
+        /// <summary>The SPEC-TRAY-020 startup auto-check switch (REQ-UPD-013): absent, null and
+        /// non-boolean values load as true; only an explicit boolean false loads as false (the
+        /// D-8 file-edit-only key — no settings-form field, no new save site).</summary>
+        public bool UpdateAutoCheckEnabled { get { return updateAutoCheckEnabled; } }
 
         /// <summary>The title-rules value; never null (a value built without one behaves as preset none).</summary>
         public TitleRulesSettings TitleRules
@@ -676,7 +704,11 @@ namespace TerminalOrganizer.App
                     // clamp 1..120, per-key degrade (never a whole-file degradation).
                     dto.attentionInfoVisibleSeconds.HasValue
                         ? ClampInfoSeconds(dto.attentionInfoVisibleSeconds.Value)
-                        : DefaultInfoVisibleSeconds);
+                        : DefaultInfoVisibleSeconds,
+                    // SPEC-TRAY-020 (REQ-UPD-013): the update auto-check switch rides the
+                    // same camelCase DTO ternary family — absent-key default true, only an
+                    // explicit boolean false loads false (D-8).
+                    dto.updateAutoCheckEnabled.HasValue ? dto.updateAutoCheckEnabled.Value : true);
             }
             catch (Exception ex)
             {
@@ -720,6 +752,10 @@ namespace TerminalOrganizer.App
                 dto.attentionStopBlinkLimit = values.AttentionStopBlinkLimit;
                 dto.attentionOverlayTopmost = values.AttentionOverlayTopmost;
                 dto.attentionInfoVisibleSeconds = values.AttentionInfoVisibleSeconds;
+                // @MX:NOTE: SPEC-TRAY-020 REQ-UPD-013 — every save writes the resolved switch so
+                // no unrelated read-modify-write save reverts a user's explicit false (the
+                // file-edit-only key; the key loads as true while absent).
+                dto.updateAutoCheckEnabled = values.UpdateAutoCheckEnabled;
                 // @MX:NOTE: generic-form parse; block kept verbatim, invalid parts included; fallback block on save.
                 // A value without a title-rules value (an older constructor) writes what loading the current file yields.
                 TitleRulesSettings block = values.HasTitleRules ? values.TitleRules : LoadCore(false).TitleRules;
@@ -906,6 +942,9 @@ namespace TerminalOrganizer.App
 
             /// <summary>The title-rules block in generic form (never a typed shape): a bad value inside it cannot degrade the file.</summary>
             public object titleRules;
+
+            /// <summary>SPEC-TRAY-020: the startup auto-check switch; null (absent key) loads as true (REQ-UPD-013).</summary>
+            public bool? updateAutoCheckEnabled;
         }
 
         /// <summary>The persisted B2 canonical manager selector shape; public fields so JavaScriptSerializer maps them.</summary>

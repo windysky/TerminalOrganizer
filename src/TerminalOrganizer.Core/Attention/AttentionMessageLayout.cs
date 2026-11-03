@@ -3,46 +3,6 @@ using System;
 namespace TerminalOrganizer.Core.Attention
 {
     /// <summary>
-    /// SPEC-TRAY-016 (REQ-MSG-001): the message-text preparation — pure, never throws.
-    /// A message renders verbatim up to MessageMaxChars (600) characters; beyond that
-    /// the first MessageMaxChars - 3 characters render followed by one ellipsis
-    /// character (597 + U+2026; plan.md section J).
-    /// </summary>
-    public static class AttentionMessageText
-    {
-        /// <summary>
-        /// True when the message renders a panel at all (REQ-MSG-002): absent, null,
-        /// or whitespace-only is ring-only — no panel form is created.
-        /// </summary>
-        public static bool IsRenderable(string message)
-        {
-            if (string.IsNullOrEmpty(message))
-            {
-                return false;
-            }
-            return message.Trim().Length > 0;
-        }
-
-        /// <summary>
-        /// The capped rendering text: verbatim up to MessageMaxChars, then
-        /// MessageMaxChars - 3 characters + one ellipsis (U+2026). Null and empty
-        /// pass through unchanged (the caller renders no panel for them anyway).
-        /// </summary>
-        public static string Prepare(string message)
-        {
-            if (string.IsNullOrEmpty(message))
-            {
-                return message;
-            }
-            if (message.Length <= AttentionConstants.MessageMaxChars)
-            {
-                return message;
-            }
-            return message.Substring(0, AttentionConstants.MessageMaxChars - 3) + "…";
-        }
-    }
-
-    /// <summary>
     /// SPEC-TRAY-016 (REQ-MSG-002, AC-009): the pure panel placement — the solid
     /// near-black card as wide as the target window, anchored just below the
     /// target's bottom edge (one RingThicknessPx below, beside the ring's lower
@@ -97,33 +57,6 @@ namespace TerminalOrganizer.Core.Attention
             }
             y = bottom - AttentionConstants.RingThicknessPx - height;
             return new int[] { left, y, width, height };
-        }
-    }
-
-    /// <summary>
-    /// t13 (the 2026-11-01 UX round): the kind-scoped text color of the message card.
-    /// The kind axis reaches the panel through the extended panel-message seam (the
-    /// controller publishes the kind beside the message); the mapping is pinned:
-    /// ask renders red, info renders the ring amber, and stop / absent / unknown
-    /// degrade to the near-white default (the closed token set mirrors the
-    /// controller's — an unknown kind is never a rendering failure).
-    /// </summary>
-    public static class AttentionMessageStyle
-    {
-        /// <summary>The text color for one attention kind: ask → MessageAskTextRgb (red);
-        /// info → RingColorRgb (the ring amber); stop, absent, and any unknown kind →
-        /// MessageTextRgb (near-white).</summary>
-        public static int TextColorRgbForKind(string kind)
-        {
-            if (string.Equals(kind, "ask", StringComparison.Ordinal))
-            {
-                return AttentionConstants.MessageAskTextRgb;
-            }
-            if (string.Equals(kind, "info", StringComparison.Ordinal))
-            {
-                return AttentionConstants.RingColorRgb;
-            }
-            return AttentionConstants.MessageTextRgb;
         }
     }
 }
