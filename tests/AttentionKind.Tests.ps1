@@ -127,7 +127,9 @@ function New-KindController([bool]$Enabled = $true, [string]$Policy = 'all', [in
         ([System.Action[IntPtr,int[]]]{ param($h, $r) $script:KindFactoryCalls.Add('restart ' + $h.ToInt64()) }), `
         ([System.Action[IntPtr,int[]]]{ param($h, $r) $script:KindFactoryCalls.Add('tick ' + $h.ToInt64()) }), `
         ([System.Action[IntPtr]]{ param($h) $script:KindFactoryCalls.Add('stop ' + $h.ToInt64()) }), `
-        ([System.Action[IntPtr]]{ param($h) $script:KindFactoryCalls.Add('hide ' + $h.ToInt64()) })
+        ([System.Action[IntPtr]]{ param($h) $script:KindFactoryCalls.Add('hide ' + $h.ToInt64()) }), `
+        ([System.Action[string,string]]$null), `
+        ([System.Action[IntPtr,int[]]]{ param($h, $r) $script:KindFactoryCalls.Add('steady ' + $h.ToInt64()) })
     $log = [System.Action[string]]{ param($line) $script:KindLog.Add($line) }
     if ($null -ne $DesktopState) {
         $script:KindDesktopState = $DesktopState
@@ -145,6 +147,10 @@ function Get-KindTicks([long]$Handle = 4101) {
 
 function Get-KindStops([long]$Handle = 4101) {
     return @($script:KindFactoryCalls | Where-Object { $_ -eq ('stop ' + $Handle) }).Count
+}
+
+function Get-KindSteadies([long]$Handle = 4101) {
+    return @($script:KindFactoryCalls | Where-Object { $_ -eq ('steady ' + $Handle) }).Count
 }
 
 function Get-KindUnknownKindLines {
@@ -226,11 +232,11 @@ Describe 'AC-005 absent/unknown kind degradation truth table (REQ-KIND-002)' {
         $controller.BlinkTick()
         $controller.BlinkTick()
         Get-KindTicks | Should Be 2
-        Get-KindStops | Should Be 0
+        Get-KindSteadies | Should Be 0
         $controller.BlinkTick()
         Get-KindTicks | Should Be 3
-        $script:KindFactoryCalls[-1] | Should BeExactly 'stop 4101'
-        $script:KindLog[-1] | Should BeExactly 'attention: overlay stopped hwnd=4101 reason=blinklimit'
+        $script:KindFactoryCalls[-1] | Should BeExactly 'steady 4101'
+        $script:KindLog[-1] | Should BeExactly 'attention: overlay steady hwnd=4101 reason=blinklimit'
         $controller.Dispose()
     }
 
@@ -240,7 +246,7 @@ Describe 'AC-005 absent/unknown kind degradation truth table (REQ-KIND-002)' {
         $controller.PollTick()
         for ($i = 0; $i -lt 30; $i++) { $controller.BlinkTick() }
         Get-KindTicks | Should Be 30
-        Get-KindStops | Should Be 0
+        Get-KindSteadies | Should Be 0
         $controller.Dispose()
     }
 
@@ -251,7 +257,7 @@ Describe 'AC-005 absent/unknown kind degradation truth table (REQ-KIND-002)' {
             $controller.PollTick()
             for ($i = 0; $i -lt 25; $i++) { $controller.BlinkTick() }
             Get-KindTicks | Should Be 25
-            Get-KindStops | Should Be 0
+            Get-KindSteadies | Should Be 0
             $controller.Dispose()
         }
     }
@@ -264,10 +270,10 @@ Describe 'AC-005 absent/unknown kind degradation truth table (REQ-KIND-002)' {
         $lines.Count | Should Be 1
         $lines[0] | Should BeExactly 'attention: unknown kind "warn" (treated as absent) event=stop needle="hooks"'
         for ($i = 0; $i -lt 2; $i++) { $controller.BlinkTick() }
-        Get-KindStops | Should Be 0
+        Get-KindSteadies | Should Be 0
         $controller.BlinkTick()
-        Get-KindStops | Should Be 1
-        $script:KindLog[-1] | Should BeExactly 'attention: overlay stopped hwnd=4101 reason=blinklimit'
+        Get-KindSteadies | Should Be 1
+        $script:KindLog[-1] | Should BeExactly 'attention: overlay steady hwnd=4101 reason=blinklimit'
         (Get-KindUnknownKindLines).Count | Should Be 1
         $controller.Dispose()
     }
@@ -278,7 +284,7 @@ Describe 'AC-005 absent/unknown kind degradation truth table (REQ-KIND-002)' {
         $controller.PollTick()
         for ($i = 0; $i -lt 25; $i++) { $controller.BlinkTick() }
         Get-KindTicks | Should Be 25
-        Get-KindStops | Should Be 0
+        Get-KindSteadies | Should Be 0
         (Get-KindUnknownKindLines).Count | Should Be 1
         $controller.Dispose()
     }
@@ -295,7 +301,7 @@ Describe 'AC-006 ask and stop kinds (REQ-KIND-001)' {
             $controller.PollTick()
             for ($i = 0; $i -lt 30; $i++) { $controller.BlinkTick() }
             Get-KindTicks | Should Be 30
-            Get-KindStops | Should Be 0
+            Get-KindSteadies | Should Be 0
             $controller.Dispose()
         }
     }
@@ -305,11 +311,11 @@ Describe 'AC-006 ask and stop kinds (REQ-KIND-001)' {
         $script:KindNextPoll = New-KindPollResult @((New-KindSignal 'stop' 'hooks' 'stop'))
         $controller.PollTick()
         for ($i = 0; $i -lt 2; $i++) { $controller.BlinkTick() }
-        Get-KindStops | Should Be 0
+        Get-KindSteadies | Should Be 0
         $controller.BlinkTick()
-        Get-KindStops | Should Be 1
+        Get-KindSteadies | Should Be 1
         Get-KindTicks | Should Be 3
-        $script:KindLog[-1] | Should BeExactly 'attention: overlay stopped hwnd=4101 reason=blinklimit'
+        $script:KindLog[-1] | Should BeExactly 'attention: overlay steady hwnd=4101 reason=blinklimit'
         $controller.Dispose()
     }
 
@@ -319,10 +325,10 @@ Describe 'AC-006 ask and stop kinds (REQ-KIND-001)' {
         $controller.PollTick()
         $controller.BlinkTick()
         $controller.BlinkTick()
-        Get-KindStops | Should Be 0
+        Get-KindSteadies | Should Be 0
         $controller.BlinkTick()
-        Get-KindStops | Should Be 1
-        $script:KindLog[-1] | Should BeExactly 'attention: overlay stopped hwnd=4101 reason=blinklimit'
+        Get-KindSteadies | Should Be 1
+        $script:KindLog[-1] | Should BeExactly 'attention: overlay steady hwnd=4101 reason=blinklimit'
         $controller.Dispose()
     }
 
@@ -347,11 +353,11 @@ Describe 'AC-007 info visible-seconds cap, VD-gated (REQ-KIND-003)' {
         $controller.PollTick()
         for ($i = 0; $i -lt 19; $i++) { $controller.BlinkTick() }
         Get-KindTicks | Should Be 19
-        Get-KindStops | Should Be 0
+        Get-KindSteadies | Should Be 0
         $controller.BlinkTick()
         Get-KindTicks | Should Be 20
-        $script:KindFactoryCalls[-1] | Should BeExactly 'stop 4101'
-        $script:KindLog[-1] | Should BeExactly 'attention: overlay stopped hwnd=4101 reason=infocap'
+        $script:KindFactoryCalls[-1] | Should BeExactly 'steady 4101'
+        $script:KindLog[-1] | Should BeExactly 'attention: overlay steady hwnd=4101 reason=infocap'
         $controller.Dispose()
     }
 
@@ -365,16 +371,16 @@ Describe 'AC-007 info visible-seconds cap, VD-gated (REQ-KIND-003)' {
         $script:KindDesktopState['OnCurrent'] = $false
         for ($i = 0; $i -lt 8; $i++) { $controller.BlinkTick() }
         Get-KindTicks | Should Be 5
-        Get-KindStops | Should Be 0
+        Get-KindSteadies | Should Be 0
         (@($script:KindFactoryCalls | Where-Object { $_ -eq 'hide 4101' })).Count | Should Be 8
         $script:KindDesktopState['OnCurrent'] = $true
         for ($i = 0; $i -lt 14; $i++) { $controller.BlinkTick() }
         Get-KindTicks | Should Be 19
-        Get-KindStops | Should Be 0
+        Get-KindSteadies | Should Be 0
         $controller.BlinkTick()
         Get-KindTicks | Should Be 20
-        Get-KindStops | Should Be 1
-        $script:KindLog[-1] | Should BeExactly 'attention: overlay stopped hwnd=4101 reason=infocap'
+        Get-KindSteadies | Should Be 1
+        $script:KindLog[-1] | Should BeExactly 'attention: overlay steady hwnd=4101 reason=infocap'
         $controller.Dispose()
     }
 
@@ -385,11 +391,11 @@ Describe 'AC-007 info visible-seconds cap, VD-gated (REQ-KIND-003)' {
         $controller.PollTick()
         for ($i = 0; $i -lt 19; $i++) { $controller.BlinkTick() }
         Get-KindTicks | Should Be 19
-        Get-KindStops | Should Be 0
+        Get-KindSteadies | Should Be 0
         $controller.BlinkTick()
         Get-KindTicks | Should Be 20
-        Get-KindStops | Should Be 1
-        $script:KindLog[-1] | Should BeExactly 'attention: overlay stopped hwnd=4101 reason=infocap'
+        Get-KindSteadies | Should Be 1
+        $script:KindLog[-1] | Should BeExactly 'attention: overlay steady hwnd=4101 reason=infocap'
         $controller.Dispose()
     }
 
@@ -399,19 +405,19 @@ Describe 'AC-007 info visible-seconds cap, VD-gated (REQ-KIND-003)' {
         $controller.PollTick()
         $controller.BlinkTick()
         $controller.BlinkTick()
-        Get-KindStops | Should Be 0
+        Get-KindSteadies | Should Be 0
         $script:KindNextPoll = New-KindPollResult @((New-KindSignal 'notification' 'hooks' 'info'))
         $controller.PollTick()
         ($script:KindLog -contains 'attention: overlay restarted hwnd=4101') | Should Be $true
         $controller.BlinkTick()
         # Without the reset this tick is the 3rd visible tick of the stop window -> blinklimit.
-        Get-KindStops | Should Be 0
+        Get-KindSteadies | Should Be 0
         for ($i = 0; $i -lt 18; $i++) { $controller.BlinkTick() }
         # 19 visible ticks of the NEW info window - one short of the 20-tick cap.
-        Get-KindStops | Should Be 0
+        Get-KindSteadies | Should Be 0
         $controller.BlinkTick()
-        Get-KindStops | Should Be 1
-        $script:KindLog[-1] | Should BeExactly 'attention: overlay stopped hwnd=4101 reason=infocap'
+        Get-KindSteadies | Should Be 1
+        $script:KindLog[-1] | Should BeExactly 'attention: overlay steady hwnd=4101 reason=infocap'
         # Full accounting: 2 ticks of the stop window + 20 of the adopted info window.
         Get-KindTicks | Should Be 22
         $controller.Dispose()
@@ -422,17 +428,17 @@ Describe 'AC-007 info visible-seconds cap, VD-gated (REQ-KIND-003)' {
         $script:KindNextPoll = New-KindPollResult @((New-KindSignal 'notification' 'hooks' 'info'))
         $controller.PollTick()
         for ($i = 0; $i -lt 19; $i++) { $controller.BlinkTick() }
-        Get-KindStops | Should Be 0
+        Get-KindSteadies | Should Be 0
         $script:KindNextPoll = New-KindPollResult @((New-KindSignal 'stop' 'hooks' 'stop'))
         $controller.PollTick()
         ($script:KindLog -contains 'attention: overlay restarted hwnd=4101') | Should Be $true
         $controller.BlinkTick()
         # Without the reset this tick is the 20th visible tick of the info window -> infocap.
-        Get-KindStops | Should Be 0
+        Get-KindSteadies | Should Be 0
         $controller.BlinkTick()
         $controller.BlinkTick()
-        Get-KindStops | Should Be 1
-        $script:KindLog[-1] | Should BeExactly 'attention: overlay stopped hwnd=4101 reason=blinklimit'
+        Get-KindSteadies | Should Be 1
+        $script:KindLog[-1] | Should BeExactly 'attention: overlay steady hwnd=4101 reason=blinklimit'
         $controller.Dispose()
     }
 
@@ -442,10 +448,10 @@ Describe 'AC-007 info visible-seconds cap, VD-gated (REQ-KIND-003)' {
         $script:KindNextPoll = New-KindPollResult @((New-KindSignal 'notification' 'hooks' 'info'))
         $controller.PollTick()
         $controller.BlinkTick()
-        Get-KindStops | Should Be 0
+        Get-KindSteadies | Should Be 0
         $controller.BlinkTick()
-        Get-KindStops | Should Be 1
-        $script:KindLog[-1] | Should BeExactly 'attention: overlay stopped hwnd=4101 reason=infocap'
+        Get-KindSteadies | Should Be 1
+        $script:KindLog[-1] | Should BeExactly 'attention: overlay steady hwnd=4101 reason=infocap'
         $controller.Dispose()
     }
 
@@ -455,11 +461,112 @@ Describe 'AC-007 info visible-seconds cap, VD-gated (REQ-KIND-003)' {
         $script:KindNextPoll = New-KindPollResult @((New-KindSignal 'notification' 'hooks' 'info'))
         $controller.PollTick()
         for ($i = 0; $i -lt 5; $i++) { $controller.BlinkTick() }
+        Get-KindSteadies | Should Be 0
+        $controller.BlinkTick()
+        Get-KindSteadies | Should Be 1
+        $script:KindLog[-1] | Should BeExactly 'attention: overlay steady hwnd=4101 reason=infocap'
+        $controller.Dispose()
+    }
+}
+
+Describe 't18 steady dim ring: a capped overlay stays lit until the user attends (2026-11-04)' {
+    # t18 (2026-11-04 UX round): when the stop blink limit or the info cap runs out,
+    # the overlay is NOT removed - it switches to a steady (non-blinking) dimmer ring
+    # and keeps its card, and the shipped user-attention stops (foreground,
+    # minimized, moved, closed) still end it. The ask kind never caps, so never dims.
+
+    It 'the cap turns the ring steady instead of stopping it; later ticks re-assert steady, never blink' {
+        $controller = New-KindController -Policy 'all' -Limit 3
+        $script:KindNextPoll = New-KindPollResult @((New-KindSignal 'stop' 'hooks' 'stop'))
+        $controller.PollTick()
+        for ($i = 0; $i -lt 3; $i++) { $controller.BlinkTick() }
+        Get-KindSteadies | Should Be 1
+        for ($i = 0; $i -lt 5; $i++) { $controller.BlinkTick() }
+        Get-KindTicks | Should Be 3
+        Get-KindSteadies | Should Be 6
         Get-KindStops | Should Be 0
+        (@($script:KindLog | Where-Object { $_ -like 'attention: overlay steady*' })).Count | Should Be 1
+        $controller.Dispose()
+    }
+
+    It 'focusing the window ends a steady ring (reason=foreground)' {
+        $controller = New-KindController -Policy 'all'
+        $controller.SetInfoVisibleSeconds(1)
+        $script:KindNextPoll = New-KindPollResult @((New-KindSignal 'notification' 'hooks' 'info'))
+        $controller.PollTick()
+        for ($i = 0; $i -lt 4; $i++) { $controller.BlinkTick() }
+        Get-KindSteadies | Should Be 3
+        $script:KindForegroundHandle = [IntPtr]4101
         $controller.BlinkTick()
         Get-KindStops | Should Be 1
-        $script:KindLog[-1] | Should BeExactly 'attention: overlay stopped hwnd=4101 reason=infocap'
+        $script:KindLog[-1] | Should BeExactly 'attention: overlay stopped hwnd=4101 reason=foreground'
         $controller.Dispose()
+    }
+
+    It 'moving the window ends a steady ring (reason=moved)' {
+        $controller = New-KindController -Policy 'all' -Limit 1
+        $script:KindNextPoll = New-KindPollResult @((New-KindSignal 'stop' 'hooks' 'stop'))
+        $controller.PollTick()
+        $controller.BlinkTick()
+        Get-KindSteadies | Should Be 1
+        $script:KindRectFeed = @(150, 250, 950, 750)
+        $controller.BlinkTick()
+        Get-KindStops | Should Be 1
+        $script:KindLog[-1] | Should BeExactly 'attention: overlay stopped hwnd=4101 reason=moved'
+        $controller.Dispose()
+    }
+
+    It 'a new signal on a steady ring restarts the blinking with a fresh count' {
+        $controller = New-KindController -Policy 'all' -Limit 2
+        $script:KindNextPoll = New-KindPollResult @((New-KindSignal 'stop' 'hooks' 'stop'))
+        $controller.PollTick()
+        for ($i = 0; $i -lt 3; $i++) { $controller.BlinkTick() }
+        Get-KindTicks | Should Be 2
+        Get-KindSteadies | Should Be 2
+        $script:KindNextPoll = New-KindPollResult @((New-KindSignal 'stop' 'hooks' 'stop'))
+        $controller.PollTick()
+        ($script:KindLog -contains 'attention: overlay restarted hwnd=4101') | Should Be $true
+        $controller.BlinkTick()
+        Get-KindTicks | Should Be 3
+        Get-KindSteadies | Should Be 2
+        $controller.BlinkTick()
+        Get-KindTicks | Should Be 4
+        Get-KindSteadies | Should Be 3
+        $controller.Dispose()
+    }
+
+    It 'off-desktop hides a steady ring; returning re-asserts it steady (not blinking)' {
+        $state = @{ Calls = 0; Success = $true; OnCurrent = $true; Error = '' }
+        $controller = New-KindController -Policy 'all' -Limit 1 -DesktopState $state
+        $script:KindNextPoll = New-KindPollResult @((New-KindSignal 'stop' 'hooks' 'stop'))
+        $controller.PollTick()
+        $controller.BlinkTick()
+        Get-KindSteadies | Should Be 1
+        $script:KindDesktopState['OnCurrent'] = $false
+        $controller.BlinkTick()
+        $script:KindFactoryCalls[-1] | Should BeExactly 'hide 4101'
+        $script:KindDesktopState['OnCurrent'] = $true
+        $controller.BlinkTick()
+        $script:KindFactoryCalls[-1] | Should BeExactly 'steady 4101'
+        Get-KindTicks | Should Be 1
+        Get-KindStops | Should Be 0
+        $controller.Dispose()
+    }
+
+    It 'the ask kind never caps, so it never turns steady' {
+        $controller = New-KindController -Policy 'all' -Limit 1
+        $script:KindNextPoll = New-KindPollResult @((New-KindSignal 'notification' 'hooks' 'ask'))
+        $controller.PollTick()
+        for ($i = 0; $i -lt 40; $i++) { $controller.BlinkTick() }
+        Get-KindTicks | Should Be 40
+        Get-KindSteadies | Should Be 0
+        $controller.Dispose()
+    }
+
+    It 'pins the dim ring color: the amber RingColorRgb at half brightness (0x7F5F00)' {
+        $c = [TerminalOrganizer.Core.Attention.AttentionConstants]
+        $c::RingColorRgb | Should Be 0xFFBF00
+        $c::RingDimColorRgb | Should Be 0x7F5F00
     }
 }
 

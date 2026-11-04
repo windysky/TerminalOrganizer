@@ -470,7 +470,9 @@ function New-OptionsTestController([bool]$Enabled = $true, [string]$Policy = 'al
         ([System.Action[IntPtr,int[]]]{ param($h, $r) $script:OptionsFactoryCalls.Add('restart ' + $h.ToInt64()) }), `
         ([System.Action[IntPtr,int[]]]{ param($h, $r) $script:OptionsFactoryCalls.Add('tick ' + $h.ToInt64()) }), `
         ([System.Action[IntPtr]]{ param($h) $script:OptionsFactoryCalls.Add('stop ' + $h.ToInt64()) }), `
-        ([System.Action[IntPtr]]{ param($h) $script:OptionsFactoryCalls.Add('hide ' + $h.ToInt64()) })
+        ([System.Action[IntPtr]]{ param($h) $script:OptionsFactoryCalls.Add('hide ' + $h.ToInt64()) }), `
+        ([System.Action[string,string]]$null), `
+        ([System.Action[IntPtr,int[]]]{ param($h, $r) $script:OptionsFactoryCalls.Add('steady ' + $h.ToInt64()) })
     $log = [System.Action[string]]{ param($line) $script:OptionsLog.Add($line) }
     if ($null -ne $DesktopState) {
         $desktop = [OptionsDesktopFake]::new($DesktopState)
@@ -576,16 +578,19 @@ Describe 'AC-005 Blink-limit lifecycle (REQ-CTL-002)' {
         $controller.BlinkTick()
         $controller.BlinkTick()
         (@($script:OptionsFactoryCalls | Where-Object { $_ -eq 'tick 4101' }).Count) | Should Be 2
-        (@($script:OptionsFactoryCalls | Where-Object { $_ -eq 'stop 4101' }).Count) | Should Be 0
+        (@($script:OptionsFactoryCalls | Where-Object { $_ -eq 'steady 4101' }).Count) | Should Be 0
         $controller.BlinkTick()
         (@($script:OptionsFactoryCalls | Where-Object { $_ -eq 'tick 4101' }).Count) | Should Be 3
-        $script:OptionsFactoryCalls[-1] | Should BeExactly 'stop 4101'
-        $script:OptionsLog[-1] | Should BeExactly 'attention: overlay stopped hwnd=4101 reason=blinklimit'
+        $script:OptionsFactoryCalls[-1] | Should BeExactly 'steady 4101'
+        $script:OptionsLog[-1] | Should BeExactly 'attention: overlay steady hwnd=4101 reason=blinklimit'
         $script:OptionsLog.Clear()
         $script:OptionsFactoryCalls.Clear()
         $controller.BlinkTick()
+        # t18: the capped overlay stays alive as a steady dim ring - the next tick
+        # re-asserts it (one steady call), never blinks it, and logs nothing.
         $script:OptionsLog.Count | Should Be 0
-        $script:OptionsFactoryCalls.Count | Should Be 0
+        $script:OptionsFactoryCalls.Count | Should Be 1
+        $script:OptionsFactoryCalls[0] | Should BeExactly 'steady 4101'
         $controller.Dispose()
     }
 
@@ -595,8 +600,8 @@ Describe 'AC-005 Blink-limit lifecycle (REQ-CTL-002)' {
         $controller.PollTick()
         $controller.BlinkTick()
         $script:OptionsFactoryCalls[-2] | Should BeExactly 'tick 4101'
-        $script:OptionsFactoryCalls[-1] | Should BeExactly 'stop 4101'
-        $script:OptionsLog[-1] | Should BeExactly 'attention: overlay stopped hwnd=4101 reason=blinklimit'
+        $script:OptionsFactoryCalls[-1] | Should BeExactly 'steady 4101'
+        $script:OptionsLog[-1] | Should BeExactly 'attention: overlay steady hwnd=4101 reason=blinklimit'
         $controller.Dispose()
     }
 
@@ -606,7 +611,7 @@ Describe 'AC-005 Blink-limit lifecycle (REQ-CTL-002)' {
         $controller.PollTick()
         for ($i = 0; $i -lt 13; $i++) { $controller.BlinkTick() }
         (@($script:OptionsFactoryCalls | Where-Object { $_ -eq 'tick 4101' }).Count) | Should Be 13
-        (@($script:OptionsFactoryCalls | Where-Object { $_ -like 'stop *' }).Count) | Should Be 0
+        (@($script:OptionsFactoryCalls | Where-Object { $_ -like 'steady *' }).Count) | Should Be 0
         $controller.Dispose()
     }
 
@@ -618,16 +623,16 @@ Describe 'AC-005 Blink-limit lifecycle (REQ-CTL-002)' {
         $controller.BlinkTick()
         $controller.BlinkTick()
         (@($script:OptionsFactoryCalls | Where-Object { $_ -eq 'hide 4101' }).Count) | Should Be 2
-        (@($script:OptionsFactoryCalls | Where-Object { $_ -like 'stop *' }).Count) | Should Be 0
+        (@($script:OptionsFactoryCalls | Where-Object { $_ -like 'steady *' }).Count) | Should Be 0
         $desktop['OnCurrent'] = $true
         $controller.BlinkTick()
         $controller.BlinkTick()
         (@($script:OptionsFactoryCalls | Where-Object { $_ -eq 'tick 4101' }).Count) | Should Be 2
-        (@($script:OptionsFactoryCalls | Where-Object { $_ -like 'stop *' }).Count) | Should Be 0
+        (@($script:OptionsFactoryCalls | Where-Object { $_ -like 'steady *' }).Count) | Should Be 0
         $controller.BlinkTick()
         (@($script:OptionsFactoryCalls | Where-Object { $_ -eq 'tick 4101' }).Count) | Should Be 3
-        $script:OptionsFactoryCalls[-1] | Should BeExactly 'stop 4101'
-        $script:OptionsLog[-1] | Should BeExactly 'attention: overlay stopped hwnd=4101 reason=blinklimit'
+        $script:OptionsFactoryCalls[-1] | Should BeExactly 'steady 4101'
+        $script:OptionsLog[-1] | Should BeExactly 'attention: overlay steady hwnd=4101 reason=blinklimit'
         $controller.Dispose()
     }
 
@@ -642,7 +647,7 @@ Describe 'AC-005 Blink-limit lifecycle (REQ-CTL-002)' {
         for ($i = 0; $i -lt 13; $i++) { $controller.BlinkTick() }
         # 1 pre-restart tick + 13 further (N+10) ticks: the restart RESETS the count, so no stop
         (@($script:OptionsFactoryCalls | Where-Object { $_ -eq 'tick 4101' }).Count) | Should Be 14
-        (@($script:OptionsFactoryCalls | Where-Object { $_ -like 'stop *' }).Count) | Should Be 0
+        (@($script:OptionsFactoryCalls | Where-Object { $_ -like 'steady *' }).Count) | Should Be 0
 
         $controller2 = New-OptionsTestController -Policy 'mixed' -Limit 3
         $script:OptionsNextPoll = New-OptionsTestPollResult @((New-OptionsTestSignal 'notification' 'pwsh'))
@@ -653,9 +658,9 @@ Describe 'AC-005 Blink-limit lifecycle (REQ-CTL-002)' {
         (@($script:OptionsFactoryCalls | Where-Object { $_ -eq 'restart 4101' }).Count) | Should Be 1
         $controller2.BlinkTick()
         $controller2.BlinkTick()
-        (@($script:OptionsFactoryCalls | Where-Object { $_ -like 'stop *' }).Count) | Should Be 0
+        (@($script:OptionsFactoryCalls | Where-Object { $_ -like 'steady *' }).Count) | Should Be 0
         $controller2.BlinkTick()
-        $script:OptionsLog[-1] | Should BeExactly 'attention: overlay stopped hwnd=4101 reason=blinklimit'
+        $script:OptionsLog[-1] | Should BeExactly 'attention: overlay steady hwnd=4101 reason=blinklimit'
         $controller.Dispose()
         $controller2.Dispose()
     }
@@ -665,10 +670,10 @@ Describe 'AC-005 Blink-limit lifecycle (REQ-CTL-002)' {
         $script:OptionsNextPoll = New-OptionsTestPollResult @((New-OptionsTestSignal 'stop' 'claude'))
         $controller.PollTick()
         $controller.BlinkTick()
-        (@($script:OptionsFactoryCalls | Where-Object { $_ -like 'stop *' }).Count) | Should Be 0
+        (@($script:OptionsFactoryCalls | Where-Object { $_ -like 'steady *' }).Count) | Should Be 0
         $controller.BlinkTick()
-        (@($script:OptionsFactoryCalls | Where-Object { $_ -eq 'stop 4101' }).Count) | Should Be 1
-        (@($script:OptionsFactoryCalls | Where-Object { $_ -eq 'stop 4102' }).Count) | Should Be 1
+        (@($script:OptionsFactoryCalls | Where-Object { $_ -eq 'steady 4101' }).Count) | Should Be 1
+        (@($script:OptionsFactoryCalls | Where-Object { $_ -eq 'steady 4102' }).Count) | Should Be 1
         $controller.Dispose()
     }
 

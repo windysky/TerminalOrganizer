@@ -96,14 +96,47 @@ Describe 'AC-009 message layout and truncation' {
         $t::IsRenderable('hooks done') | Should Be $true
     }
 
-    It 'PlacePanel places the card below the target, one ring thickness (6 px) under the bottom edge' {
-        # AC-009 below placement: x=L, y=B+RingThicknessPx(6), width=R-L,
-        # height=textHeight+2*MessagePaddingPx(10). 606+62=668 stays inside 1040.
+    It 'PlacePanel never places the card below the target, even when the work area has room (t17)' {
+        # t17 (2026-11-04): the AC-009 below branch is REMOVED - the space below a
+        # zoned window belongs to the neighbouring window, so the card stays inside
+        # its own target. Below would have fit (606+62=668 <= 1040) but the right
+        # column is 400/2=200 < MessageMinColumnPx(280) -> inside-bottom:
+        # y = B-RingThicknessPx-height = 600-6-62 = 532, full target width.
+        # (Supersedes the AC-009 below expectation 606 - same scenario inputs, new rule.)
         $r = [TerminalOrganizer.Core.Attention.AttentionMessageLayout]::PlacePanel(@(100, 200, 500, 600), @(0, 0, 1920, 1040), 380, 42)
         $r[0] | Should Be 100
-        $r[1] | Should Be 606
+        $r[1] | Should Be 532
         $r[2] | Should Be 400
         $r[3] | Should Be 62
+    }
+
+    It 'PlacePanel docks inside-right for an upper-zone window with room below (t17)' {
+        # The live repro shape: an upper-zone window (100,200)-(800,600) with a
+        # neighbour below. Below would fit (606+62 <= 1040) but the card now docks
+        # inside-right: column 350 >= 280, preferred 400 -> capped 350;
+        # x = 800-350 = 450, y = 200+40 = 240.
+        $r = [TerminalOrganizer.Core.Attention.AttentionMessageLayout]::PlacePanel(@(100, 200, 800, 600), @(0, 0, 1920, 1040), 380, 42)
+        $r[0] | Should Be 450
+        $r[1] | Should Be 240
+        $r[2] | Should Be 350
+        $r[3] | Should Be 62
+    }
+
+    It 'PlacePanel keeps the card inside the target rectangle on every branch (t17)' {
+        $cases = @(
+            @(@(100, 200, 500, 600), 380),
+            @(@(100, 200, 800, 600), 380),
+            @(@(100, 200, 800, 1030), 200),
+            @(@(0, 100, 558, 1030), 380)
+        )
+        foreach ($c in $cases) {
+            $t = $c[0]
+            $r = [TerminalOrganizer.Core.Attention.AttentionMessageLayout]::PlacePanel($t, @(0, 0, 1920, 1040), $c[1], 42)
+            ($r[0] -ge $t[0]) | Should Be $true
+            (($r[0] + $r[2]) -le $t[2]) | Should Be $true
+            ($r[1] -ge $t[1]) | Should Be $true
+            (($r[1] + $r[3]) -le $t[3]) | Should Be $true
+        }
     }
 
     It 'PlacePanel falls back inside-bottom when the work area ends below and the right column is too narrow (t11)' {
@@ -348,11 +381,12 @@ Describe 't11 inside-right placement: the message card never covers the title ba
     # than MessageMinColumnPx falls back INSIDE-BOTTOM (full width, one ring
     # thickness above the bottom edge).
 
-    It 'fit-below boundary: y+height exactly at the work-area bottom still places below' {
-        # 972+6=978; 978+62=1040 == workArea bottom -> fits (strictly-greater crosses).
+    It 'former fit-below boundary: y+height exactly at the work-area bottom now stays inside (t17)' {
+        # Pre-t17 this placed below at 978 (978+62=1040). t17: column 200 < 280 ->
+        # inside-bottom y = 972-6-62 = 904, full target width.
         $r = [TerminalOrganizer.Core.Attention.AttentionMessageLayout]::PlacePanel(@(100, 500, 500, 972), @(0, 0, 1920, 1040), 380, 42)
         $r[0] | Should Be 100
-        $r[1] | Should Be 978
+        $r[1] | Should Be 904
         $r[2] | Should Be 400
         $r[3] | Should Be 62
     }

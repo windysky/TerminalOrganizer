@@ -153,7 +153,7 @@ When a Claude Code session running on the WSL side wants you to look at a termin
 
 While the tray app runs it also refreshes a heartbeat file (`organizer.json` in the same attention directory) every 5 seconds. A wsl-toast producer v1.5 or newer reads that heartbeat and, while it is fresh, skips its own OS toast and taskbar flash — the signal still arrives, and the overlay becomes the notification. If the organizer is not running (or stalls), the heartbeat goes stale and the producer falls back to toast and flash within about 15 seconds.
 
-A signal that carries a `message` (the first paragraph of the reply, at most 600 characters) renders it in a solid near-black card beside the ringing window: the text is selectable and copyable, the card's close glyph dismisses only the card (the ring keeps blinking), and clicking the card never counts as focusing the window.
+A signal that carries a `message` (the first paragraph of the reply, at most 600 characters) renders it in a solid near-black card inside the ringing window — docked to its right edge below the title bar, or along its bottom edge when the window is narrow, so it never covers a neighboring window: the text is selectable and copyable, the card's close glyph dismisses only the card (the ring keeps blinking), and clicking the card never counts as focusing the window.
 
 The overlay is on by default, and everything about it lives in the **Attention overlay** tray submenu — every choice is saved to `%LOCALAPPDATA%\TerminalOrganizer\settings.json` (settings stay at schemaVersion 3):
 
@@ -167,11 +167,11 @@ The overlay is on by default, and everything about it lives in the **Attention o
 
 **Event policy** and **Stop blinks** are radio submenus: each lists its values with the current one checked, and picking a row saves that value directly (a hand-edited out-of-set value in `settings.json` leaves every choice unchecked until you pick one, which then saves normally).
 
-Under **Event policy**, signals come in two kinds: *notification* events (a session wants you to look) and *stop* events (a session reports it is done waiting). **Mixed** blinks notifications until the window is focused — no time limit — while stop events blink a fixed count and then stop on their own. **All** treats both kinds as notifications (blink until focused); **Notifications only** ignores stop events entirely.
+Under **Event policy**, signals come in two kinds: *notification* events (a session wants you to look) and *stop* events (a session reports it is done waiting). **Mixed** blinks notifications until the window is focused — no time limit — while stop events blink a fixed count and then settle into a steady, dimmer ring that stays until you attend to the window. **All** treats both kinds as notifications (blink until focused); **Notifications only** ignores stop events entirely.
 
 **Stop blinks** sets that fixed count for stop events. One blink is a single visible flash, so the default of 10 lasts about 5 seconds.
 
-Besides the event axis, a signal may carry a `kind`: *ask* blinks until the window is focused (the usual behavior), *info* blinks for `attentionInfoVisibleSeconds` seconds — counted only while the window's virtual desktop is the current one, so switching away pauses the countdown — and then stops on its own, and *stop* keeps its fixed blink count. A signal without `kind`, or with a value the app does not recognize, keeps today's behavior exactly. The producer has not started sending `kind` yet; until it does, nothing changes.
+Besides the event axis, a signal may carry a `kind`: *ask* blinks until the window is focused (the usual behavior), *info* blinks for `attentionInfoVisibleSeconds` seconds — counted only while the window's virtual desktop is the current one, so switching away pauses the countdown — and then settles into the same steady, dimmer ring, and *stop* keeps its fixed blink count. The steady ring (and its message card) clears the same way the blinking does: focusing, minimizing, moving or closing the window. A signal without `kind`, or with a value the app does not recognize, keeps today's behavior exactly. The producer has not started sending `kind` yet; until it does, nothing changes.
 
 **Always on top** is off by default: the border sits at the terminal's own level, so a window covering the terminal covers the border too. Turn it on to keep the border above other windows.
 

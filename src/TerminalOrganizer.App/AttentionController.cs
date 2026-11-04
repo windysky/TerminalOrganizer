@@ -63,6 +63,10 @@ namespace TerminalOrganizer.App
             public int[] LastQuad;
             public int VisibleTicks;
             public StopCondition StopCondition;
+
+            /// <summary>t18: true once the cap ran out — the ring is the steady dim ring
+            /// (re-asserted per on-desktop tick, never counted); a restart clears it.</summary>
+            public bool Steady;
         }
 
         /// <summary>
@@ -385,7 +389,8 @@ namespace TerminalOrganizer.App
         /// rectangle; a target that died, gained foreground focus, was minimized — or,
         /// per D-10, MOVED OR RESIZED (any edge of the quad changed since the last
         /// seen/seeded quad) — stops with its reason. SPEC-TRAY-014 adds the blink-limit
-        /// stop (REQ-CTL-002): a blink-limited overlay stops on its Nth VISIBLE tick —
+        /// stop (REQ-CTL-002) — t18 turns that cap into the steady dim ring instead of a
+        /// removal (SteadyOverlay): a blink-limited overlay caps on its Nth VISIBLE tick —
         /// one blink is one visible tick (plan review Q1, binding) — with the Nth tick
         /// recording its Tick BEFORE the stop (tick-then-stop, the shipped order); hidden
         /// off-desktop ticks do not count, and a failed desktop check keeps the ring
@@ -400,6 +405,7 @@ namespace TerminalOrganizer.App
                 return;
             }
             List<KeyValuePair<long, string>> stops = null;
+            List<KeyValuePair<long, string>> capped = null;
             foreach (KeyValuePair<long, OverlayState> pair in trackedOverlays)
             {
                 IntPtr handle = new IntPtr(pair.Key);
@@ -434,14 +440,21 @@ namespace TerminalOrganizer.App
                     overlays.Hide(handle);
                     continue;
                 }
+                if (pair.Value.Steady)
+                {
+                    // t18: past the cap the ring stays lit, steady and dim — re-asserted
+                    // (it may be returning from a desktop-hide), never toggled or counted.
+                    overlays.Steady(handle, rect);
+                    continue;
+                }
                 overlays.Tick(handle, rect);
                 if (pair.Value.StopCondition == StopCondition.FixedCount)
                 {
-                    CountVisibleTick(ref stops, pair.Key, pair.Value, stopBlinkLimit, "blinklimit");
+                    CountVisibleTick(ref capped, pair.Key, pair.Value, stopBlinkLimit, "blinklimit");
                 }
                 else if (pair.Value.StopCondition == StopCondition.InfoSeconds)
                 {
-                    CountVisibleTick(ref stops, pair.Key, pair.Value, InfoTickCap(infoVisibleSeconds), "infocap");
+                    CountVisibleTick(ref capped, pair.Key, pair.Value, InfoTickCap(infoVisibleSeconds), "infocap");
                 }
             }
             if (stops != null)
@@ -449,6 +462,13 @@ namespace TerminalOrganizer.App
                 for (int i = 0; i < stops.Count; i++)
                 {
                     StopOverlay(stops[i].Key, stops[i].Value);
+                }
+            }
+            if (capped != null)
+            {
+                for (int i = 0; i < capped.Count; i++)
+                {
+                    SteadyOverlay(capped[i].Key, capped[i].Value);
                 }
             }
         }
@@ -791,6 +811,7 @@ namespace TerminalOrganizer.App
                 state.LastQuad = rect;
                 state.VisibleTicks = 0;
                 state.StopCondition = stopCondition;
+                state.Steady = false;
             }
         }
 
@@ -859,6 +880,26 @@ namespace TerminalOrganizer.App
             return !string.Equals(kind, KindAsk, StringComparison.Ordinal)
                 && !string.Equals(kind, KindInfo, StringComparison.Ordinal)
                 && !string.Equals(kind, KindStop, StringComparison.Ordinal);
+        }
+
+        /// <summary>
+        /// t18 (the 2026-11-04 UX round): the cap (stop blink limit / info cap) no longer
+        /// removes the overlay — it turns the ring into the steady dim ring and keeps the
+        /// card; the user-attention stops (closed / foreground / minimized / moved) still
+        /// end it, and a new signal restarts the blink (ShowOverlays clears the flag).
+        /// One log line per transition, carrying the cap reason.
+        /// </summary>
+        private void SteadyOverlay(long handle, string reason)
+        {
+            OverlayState state;
+            if (!trackedOverlays.TryGetValue(handle, out state))
+            {
+                return;
+            }
+            state.Steady = true;
+            overlays.Steady(new IntPtr(handle), state.LastQuad);
+            Log("attention: overlay steady hwnd=" + handle.ToString(CultureInfo.InvariantCulture)
+                + " reason=" + reason);
         }
 
         private void StopOverlay(long handle, string reason)

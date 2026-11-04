@@ -31,6 +31,11 @@ namespace TerminalOrganizer.Core.Attention
         /// <summary>The amber ring color #FFBF00 (plan.md section J); the App overlay unpacks it into R/G/B.</summary>
         public const int RingColorRgb = 0xFFBF00;
 
+        /// <summary>t18 (the 2026-11-04 UX round): the steady dim ring color #7F5F00 — the amber
+        /// RingColorRgb at half brightness. A capped overlay (stop blink limit / info cap)
+        /// keeps this non-blinking ring until the user attends to the window.</summary>
+        public const int RingDimColorRgb = 0x7F5F00;
+
         // @MX:NOTE: SPEC-TRAY-016 message-constant block (plan.md section J): the pinned
         // panel geometry/typography set — changing any value here is a SPEC amendment,
         // never a tuning knob (the same doctrine as every constant above).

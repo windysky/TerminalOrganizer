@@ -92,6 +92,13 @@ namespace TerminalOrganizer.App
         /// Suite factories get the no-op default and ignore it.</summary>
         public readonly System.Action<string, string> SetPanelMessage;
 
+        /// <summary>t18 (the 2026-11-04 UX round): shows one ring as the STEADY dim ring —
+        /// non-blinking, RingDimColorRgb, repositioned to the controller-supplied rectangle
+        /// — once its stop blink limit or info cap has run out. Called on the capping tick
+        /// and on every later on-desktop tick (idempotent re-assert); the card stays.
+        /// Suite factories without it get a no-op.</summary>
+        public readonly System.Action<IntPtr, int[]> Steady;
+
         public AttentionOverlayFactory(System.Action<IntPtr, int[]> create,
             System.Action<IntPtr, int[]> restart, System.Action<IntPtr, int[]> tick,
             System.Action<IntPtr> stop)
@@ -110,6 +117,14 @@ namespace TerminalOrganizer.App
             System.Action<IntPtr, int[]> restart, System.Action<IntPtr, int[]> tick,
             System.Action<IntPtr> stop, System.Action<IntPtr> hide,
             System.Action<string, string> setPanelMessage)
+            : this(create, restart, tick, stop, hide, setPanelMessage, null)
+        {
+        }
+
+        public AttentionOverlayFactory(System.Action<IntPtr, int[]> create,
+            System.Action<IntPtr, int[]> restart, System.Action<IntPtr, int[]> tick,
+            System.Action<IntPtr> stop, System.Action<IntPtr> hide,
+            System.Action<string, string> setPanelMessage, System.Action<IntPtr, int[]> steady)
         {
             if (create == null) throw new ArgumentNullException("create");
             if (restart == null) throw new ArgumentNullException("restart");
@@ -121,6 +136,7 @@ namespace TerminalOrganizer.App
             Stop = stop;
             Hide = hide ?? delegate(IntPtr target) { };
             SetPanelMessage = setPanelMessage ?? delegate(string message, string kind) { };
+            Steady = steady ?? delegate(IntPtr target, int[] rect) { };
         }
 
         /// <summary>
@@ -320,6 +336,22 @@ namespace TerminalOrganizer.App
                     // twins above read the pair. Ring-only factories get the no-op default.
                     panelMessage = message;
                     panelKind = kind;
+                },
+                delegate(IntPtr target, int[] rect)
+                {
+                    // t18: the steady dim ring — shown, dimmed, never toggled. The card
+                    // twin keeps the Tick twin's desktop-gate restore (it stays up with
+                    // the dim ring; a user-closed card stays closed).
+                    AttentionOverlayForm form;
+                    if (forms.TryGetValue(target.ToInt64(), out form) && form != null)
+                    {
+                        form.Steady(rect);
+                    }
+                    AttentionMessagePanelForm panel;
+                    if (panels.TryGetValue(target.ToInt64(), out panel) && panel != null)
+                    {
+                        panel.RestoreIfDesktopHidden();
+                    }
                 });
         }
 
@@ -383,6 +415,10 @@ namespace TerminalOrganizer.App
         private readonly int thickness;
         private bool ringOn;
 
+        /// <summary>t18: true once the ring went steady (paints RingDimColorRgb, never
+        /// toggles); a Restart / RestartHidden (a new signal) returns it to the bright blink.</summary>
+        private bool dim;
+
         internal AttentionOverlayForm(IntPtr targetHandle, int[] initialRect, bool topmostMode)
         {
             this.target = targetHandle;
@@ -436,11 +472,38 @@ namespace TerminalOrganizer.App
             Place(rect, ringOn ? SwpShowwindow : SwpHideWindow);
         }
 
-        /// <summary>Restarts the blink window (D-3): back to the visible phase, repositioned.</summary>
-        internal void Restart(int[] rect)
+        /// <summary>
+        /// t18: the steady dim ring — visible, repositioned, painted RingDimColorRgb, and
+        /// never toggled. Idempotent: the controller re-asserts it on every on-desktop
+        /// tick after the cap (and after a desktop-hide), so only the first call repaints.
+        /// </summary>
+        internal void Steady(int[] rect)
         {
+            if (!dim)
+            {
+                dim = true;
+                Invalidate();
+            }
             ringOn = true;
             Place(rect, SwpShowwindow);
+        }
+
+        /// <summary>Restarts the blink window (D-3): back to the visible phase, repositioned
+        /// — and (t18) back to the bright color if the ring had gone steady.</summary>
+        internal void Restart(int[] rect)
+        {
+            ClearDim();
+            ringOn = true;
+            Place(rect, SwpShowwindow);
+        }
+
+        private void ClearDim()
+        {
+            if (dim)
+            {
+                dim = false;
+                Invalidate();
+            }
         }
 
         /// <summary>
@@ -474,15 +537,17 @@ namespace TerminalOrganizer.App
         /// </summary>
         internal void RestartHidden(int[] rect)
         {
+            ClearDim();
             ringOn = false;
             Place(rect, SwpHideWindow);
         }
 
-        /// <summary>The amber ring: four thickness-wide bars along the form edges.</summary>
+        /// <summary>The amber ring: four thickness-wide bars along the form edges (t18: the
+        /// half-brightness RingDimColorRgb once the ring went steady).</summary>
         protected override void OnPaint(PaintEventArgs e)
         {
             base.OnPaint(e);
-            int rgb = AttentionConstants.RingColorRgb;
+            int rgb = dim ? AttentionConstants.RingDimColorRgb : AttentionConstants.RingColorRgb;
             int width = ClientSize.Width;
             int height = ClientSize.Height;
             using (SolidBrush brush = new SolidBrush(Color.FromArgb(
