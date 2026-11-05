@@ -113,10 +113,14 @@ Describe 'AC-004 The prefix is launcher metadata, never identity (REQ-STM-001)' 
         $handles.Length | Should Be 0
     }
 
-    It 'the prefixed needle HG_MyProject does not match (matching sees only the stripped title)' {
+    # Card t17 amended this row: it used to pin "does not match". The needle's own prefix is never matched as
+    # identity (the TITLE is stripped, and needle hg above still never matches), but the whole session name in the
+    # needle now contains the stripped session title, so the reverse rule matches it (spec.md as-built amendment).
+    It 'the prefixed needle HG_MyProject matches only through the reverse rule (the title is stripped; the needle may carry the prefix)' {
         $fixture = @((New-SessionCandidate 9301 'HG_MyProject' @('HG_MyProject')))
         $handles = [TerminalOrganizer.Core.Attention.AttentionMatcher]::Match('HG_MyProject', $fixture)
-        $handles.Length | Should Be 0
+        ($handles -join ',') | Should BeExactly '9301'
+        ([TerminalOrganizer.Core.Attention.AttentionMatcher]::MatchDetailed('HG_MyProject', $fixture))[0].MatchRule | Should BeExactly 'reverse'
     }
 
     It 'the stripped needle myproject still matches (the documented producer shape)' {
@@ -256,7 +260,7 @@ Describe 'AC-005 Diagnosability lines through the controller (REQ-STM-005, REQ-S
         $script:SessionNextPoll = New-SessionTestPollResult @((New-SessionTestSignal 'stop' 'zzz'))
         $controller.PollTick()
         $script:SessionLog.Count | Should Be 3
-        $script:SessionLog[0] | Should BeExactly 'attention: event=stop needle="zzz" matched=0 (no window; taskbar flash remains)'
+        $script:SessionLog[0] | Should BeExactly 'attention: event=stop needle="zzz" matched=0 (no window; no tray notice)'
         $script:SessionLog[1] | Should BeExactly 'attention: no-match hwnd=9001 session-tabs="NDResHub|NDResHub"'
         $script:SessionLog[2] | Should BeExactly 'attention: no-match hwnd=9002 session-tabs="PubChemSR|PubChemSR"'
         $script:SessionFactoryCalls.Count | Should Be 0
@@ -271,6 +275,139 @@ Describe 'AC-005 Diagnosability lines through the controller (REQ-STM-005, REQ-S
         $script:SessionNextPoll = New-SessionTestPollResult
         $controller.PollTick()
         $script:SessionLog.Count | Should Be 0
+        $controller.Dispose()
+    }
+}
+
+# --- Card t17: the reverse-containment rule (office tabs carry a shorter session name than the producer's needle) ---
+# Needle jang_projectx (one token, normalized jangprojectx) against the tab OC_projectx (session title projectx):
+# the forward rule fails (jangprojectx is not inside projectx); the reverse rule matches because the normalized
+# session title occurs inside the needle's single token, for session titles of at least 4 normalized characters.
+# The reverse rule applies to single-token needles only (a multi-token needle would degrade to any-token matching).
+
+function New-ReverseFixture([string]$Tab) {
+    return @((New-SessionCandidate 9501 $Tab @($Tab)))
+}
+
+function Get-ReverseDetail([string]$Needle, $Fixture) {
+    return @([TerminalOrganizer.Core.Attention.AttentionMatcher]::MatchDetailed($Needle, $Fixture))[0]
+}
+
+Describe 'Reverse containment: the stripped session title inside a single-token needle' {
+    It 'needle jang_projectx matches the tab OC_projectx and the detail names the reverse rule' {
+        $fixture = New-ReverseFixture 'OC_projectx'
+        ([TerminalOrganizer.Core.Attention.AttentionMatcher]::Match('jang_projectx', $fixture) -join ',') | Should BeExactly '9501'
+        $d = Get-ReverseDetail 'jang_projectx' $fixture
+        $d.Matched | Should Be $true
+        $d.MatchedSessionTitle | Should BeExactly 'projectx'
+        $d.MatchRule | Should BeExactly 'reverse'
+    }
+
+    It 'a forward match stays forward and an unmatched window reports no rule' {
+        $fixture = New-ReverseFixture 'OC_projectx'
+        $forward = Get-ReverseDetail 'projectx' $fixture
+        $forward.Matched | Should Be $true
+        $forward.MatchRule | Should BeExactly 'forward'
+        $none = Get-ReverseDetail 'zzzz' $fixture
+        $none.Matched | Should Be $false
+        $none.MatchRule | Should Be $null
+    }
+
+    It 'a title matching both ways is attributed to the forward rule (evaluated first)' {
+        $fixture = New-ReverseFixture 'OC_projectx'
+        (Get-ReverseDetail 'projectx' $fixture).MatchRule | Should BeExactly 'forward'
+        $both = New-ReverseFixture 'HG_MyProject'
+        (Get-ReverseDetail 'HG_MyProject' $both).Matched | Should Be $true
+    }
+
+    It 'the length guard: a 3-character session title (OC_pro) does not match, a 4-character one (OC_proj) does' {
+        $short = New-ReverseFixture 'OC_pro'
+        ([TerminalOrganizer.Core.Attention.AttentionMatcher]::Match('jang_projectx', $short)).Length | Should Be 0
+        (Get-ReverseDetail 'jang_projectx' $short).MatchRule | Should Be $null
+        $edge = New-ReverseFixture 'OC_proj'
+        ([TerminalOrganizer.Core.Attention.AttentionMatcher]::Match('jang_projectx', $edge) -join ',') | Should BeExactly '9501'
+        (Get-ReverseDetail 'jang_projectx' $edge).MatchRule | Should BeExactly 'reverse'
+    }
+
+    It 'the guard counts normalized characters: OC_a-b_c (abc, 3) does not match, OC_a-b_cd (abcd, 4) does' {
+        ([TerminalOrganizer.Core.Attention.AttentionMatcher]::Match('xx_abcd', (New-ReverseFixture 'OC_a-b_c'))).Length | Should Be 0
+        ([TerminalOrganizer.Core.Attention.AttentionMatcher]::Match('xx_abcd', (New-ReverseFixture 'OC_a-b_cd')) -join ',') | Should BeExactly '9501'
+    }
+
+    It 'a non-session title never matches through the reverse rule' {
+        foreach ($tab in @('C:\work\projectx', 'projectx', 'RU_projectx')) {
+            $fixture = @((New-SessionCandidate 9502 'PowerShell' @($tab)))
+            ([TerminalOrganizer.Core.Attention.AttentionMatcher]::Match('jang_projectx', $fixture)).Length | Should Be 0
+            (Get-ReverseDetail 'jang_projectx' $fixture).SuppressedTitle | Should Be $null
+        }
+    }
+
+    # A multi-token needle never takes the reverse rule: joined, it would match any window whose session title equals
+    # ONE of its tokens, turning the producer's all-tokens-in-one-title rule into any-token matching.
+    It 'a multi-token needle never matches through the reverse rule: jang projectx and projectx jang do not match OC_projectx' {
+        $fixture = New-ReverseFixture 'OC_projectx'
+        foreach ($needle in @('jang projectx', 'projectx jang', 'jang_projectx jang_projectx')) {
+            ([TerminalOrganizer.Core.Attention.AttentionMatcher]::Match($needle, $fixture)).Length | Should Be 0
+            (Get-ReverseDetail $needle $fixture).MatchRule | Should Be $null
+        }
+    }
+
+    It 'a multi-token needle keeps the forward all-tokens rule: hooks yoda does not ring OC_Hooks, jang projectx still rings a title holding both tokens' {
+        ([TerminalOrganizer.Core.Attention.AttentionMatcher]::Match('hooks yoda', (New-ReverseFixture 'OC_Hooks'))).Length | Should Be 0
+        $both = New-ReverseFixture 'OC_jangprojectx'
+        ([TerminalOrganizer.Core.Attention.AttentionMatcher]::Match('jang projectx', $both) -join ',') | Should BeExactly '9501'
+        (Get-ReverseDetail 'jang projectx' $both).MatchRule | Should BeExactly 'forward'
+    }
+
+    It 'tokens that normalize to nothing do not count: jang_projectx -- is still a single-token needle and reverse-matches' {
+        $fixture = New-ReverseFixture 'OC_projectx'
+        ([TerminalOrganizer.Core.Attention.AttentionMatcher]::Match('jang_projectx --', $fixture) -join ',') | Should BeExactly '9501'
+        (Get-ReverseDetail 'jang_projectx --' $fixture).MatchRule | Should BeExactly 'reverse'
+    }
+
+    It 'the window title is also a reverse surface' {
+        $fixture = @((New-SessionCandidate 9503 'OC_projectx' @()))
+        ([TerminalOrganizer.Core.Attention.AttentionMatcher]::Match('jang_projectx', $fixture) -join ',') | Should BeExactly '9503'
+    }
+
+    It 'a needle of zero tokens still matches nothing' {
+        $fixture = New-ReverseFixture 'OC_projectx'
+        foreach ($needle in @('__', ' - ', '...')) {
+            ([TerminalOrganizer.Core.Attention.AttentionMatcher]::Match($needle, $fixture)).Length | Should Be 0
+        }
+    }
+
+    It 'the constant is named and set to 4' {
+        [TerminalOrganizer.Core.Attention.AttentionConstants]::MinReverseSessionLength | Should Be 4
+    }
+}
+
+function New-ReverseController($Fixture) {
+    $controller = New-SessionTestController
+    $script:ReverseFixtureRows = $Fixture
+    $probeField = $controller.GetType().GetField('probeWindows', [Reflection.BindingFlags]'NonPublic,Instance')
+    if ($null -eq $probeField) { throw 'probeWindows field not found' }
+    $probeField.SetValue($controller, [Func[TerminalOrganizer.Core.Attention.AttentionCandidate[]]]{ param() $script:ReverseFixtureRows })
+    return $controller
+}
+
+Describe 'Reverse containment: log lines through the controller' {
+    It 'a reverse match logs the primary line unchanged and the detail line with a trailing rule=reverse' {
+        $controller = New-ReverseController (New-ReverseFixture 'OC_projectx')
+        $script:SessionNextPoll = New-SessionTestPollResult @((New-SessionTestSignal 'stop' 'jang_projectx'))
+        $controller.PollTick()
+        $script:SessionLog.Count | Should Be 2
+        $script:SessionLog[0] | Should BeExactly 'attention: event=stop needle="jang_projectx" matched=1'
+        $script:SessionLog[1] | Should BeExactly 'attention: match hwnd=9501 session-tab="projectx" rule=reverse'
+        $controller.Dispose()
+    }
+
+    It 'a forward match logs the detail line byte-identical to before (no rule suffix)' {
+        $controller = New-ReverseController (New-ReverseFixture 'OC_projectx')
+        $script:SessionNextPoll = New-SessionTestPollResult @((New-SessionTestSignal 'stop' 'projectx'))
+        $controller.PollTick()
+        $script:SessionLog.Count | Should Be 2
+        $script:SessionLog[1] | Should BeExactly 'attention: match hwnd=9501 session-tab="projectx"'
         $controller.Dispose()
     }
 }

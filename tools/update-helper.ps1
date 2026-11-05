@@ -27,9 +27,22 @@ param(
 function Add-HelperLog([string]$Line) {
     # LogSink line format (LogSink.cs): 'yyyy-MM-dd HH:mm:ss' + one space + the line.
     # A write failure drops the line silently; logging must never take the helper down.
+    # The line is sanitized with the same mapping as LogSink.Sanitize (REQ-LOG-001/002):
+    # CR and LF become the literal two-character escapes \r and \n, every other C0
+    # control character except TAB plus DEL becomes U+FFFD, all else passes verbatim, so
+    # a message carrying git output can never split into several physical log lines.
+    # The function stays self-contained (the test extracts and runs it alone).
     try {
+        $builder = New-Object System.Text.StringBuilder
+        foreach ($c in $Line.ToCharArray()) {
+            $code = [int]$c
+            if ($code -eq 13) { [void]$builder.Append('\r') }
+            elseif ($code -eq 10) { [void]$builder.Append('\n') }
+            elseif (($code -lt 32 -and $code -ne 9) -or $code -eq 127) { [void]$builder.Append([char]0xFFFD) }
+            else { [void]$builder.Append($c) }
+        }
         $stamp = [DateTime]::Now.ToString('yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture)
-        [IO.File]::AppendAllText($LogPath, $stamp + ' ' + $Line + [Environment]::NewLine)
+        [IO.File]::AppendAllText($LogPath, $stamp + ' ' + $builder.ToString() + [Environment]::NewLine)
     }
     catch { }
 }

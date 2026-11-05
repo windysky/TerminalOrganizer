@@ -212,8 +212,9 @@ namespace TerminalOrganizer.App
         }
 
         /// <summary>
-        /// The painted card: the solid background, the amber left stripe (RingColorRgb,
-        /// echoing the ring), and the close glyph — an X sized by MessageCloseSizePx at
+        /// The painted card: the solid background, the amber border on all four edges
+        /// (RingColorRgb, echoing the ring; MessageAccentPx thick, inside the padding, so
+        /// the card stays distinct on a black terminal), and the close glyph — an X sized by MessageCloseSizePx at
         /// the top-right corner, sitting inside the existing padding (no geometry
         /// change; the panel rect math never reserves space for it).
         /// </summary>
@@ -228,7 +229,11 @@ namespace TerminalOrganizer.App
             }
             using (SolidBrush accent = new SolidBrush(RgbColor(AttentionConstants.RingColorRgb)))
             {
-                e.Graphics.FillRectangle(accent, 0, 0, AttentionConstants.MessageAccentPx, height);
+                int border = AttentionConstants.MessageAccentPx;
+                e.Graphics.FillRectangle(accent, 0, 0, width, border);
+                e.Graphics.FillRectangle(accent, 0, height - border, width, border);
+                e.Graphics.FillRectangle(accent, 0, 0, border, height);
+                e.Graphics.FillRectangle(accent, width - border, 0, border, height);
             }
             using (Pen glyphPen = new Pen(RgbColor(AttentionConstants.MessageTextRgb)))
             {

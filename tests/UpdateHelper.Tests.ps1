@@ -323,3 +323,61 @@ Describe 'AC-009 helper git safety vocabulary (REQ-UPD-010, source-scan half)' {
         ($src -match 'Start-Process -FilePath \$ExePath -WorkingDirectory') | Should Be $true
     }
 }
+
+Describe 'F3 helper log lines are sanitized like LogSink (REQ-LOG-001/002 parity, t16)' {
+    # Extracts ONLY Add-HelperLog from the helper script through the PowerShell AST, so the
+    # test never executes the script body (no pull, no restart, no required parameters).
+    function Import-HelperLogFunction {
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:HelperScript, [ref]$tokens, [ref]$errors)
+        $fn = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Add-HelperLog' }, $true)
+        return [scriptblock]::Create($fn.Extent.Text)
+    }
+
+    It 'a line with CR, LF, a control char, DEL and a tab is written as ONE line matching the LogSink mapping' {
+        $scratch = Join-Path $here ('scratch-helperlog-' + [Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $scratch | Out-Null
+        try {
+            $LogPath = Join-Path $scratch 'app.log'
+            . (Import-HelperLogFunction)
+            $nl = [char]10
+            $cr = [char]13
+            $ctl = [char]7
+            $del = [char]127
+            $tab = [char]9
+            Add-HelperLog ('update: helper pull failed: a' + $cr + 'b' + $nl + 'c' + $ctl + 'd' + $del + 'e' + $tab + 'f')
+            $raw = [IO.File]::ReadAllText($LogPath)
+            $lines = @($raw -split "`r`n" | Where-Object { $_.Length -gt 0 })
+            $lines.Count | Should Be 1
+            $fffd = [string][char]0xFFFD
+            $expected = 'update: helper pull failed: a' + '\r' + 'b' + '\n' + 'c' + $fffd + 'd' + $fffd + 'e' + $tab + 'f'
+            $lines[0].Substring(20) | Should BeExactly $expected
+            # The stamp is the LogSink shape: 'yyyy-MM-dd HH:mm:ss' + one space.
+            ($lines[0] -match '^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} update: ') | Should Be $true
+        }
+        finally { Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue }
+    }
+
+    It 'the helper mapping equals the app LogSink.Sanitize output for the same input (parity with the real sink)' {
+        $coreDll = Join-Path $repoRoot 'bin\TerminalOrganizer.Core.dll'
+        $appExe = Join-Path $repoRoot 'bin\TerminalOrganizer.App.exe'
+        [void][Reflection.Assembly]::Load([IO.File]::ReadAllBytes($coreDll))
+        [void][Reflection.Assembly]::Load([IO.File]::ReadAllBytes($appExe))
+        $scratch = Join-Path $here ('scratch-helperlog-' + [Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $scratch | Out-Null
+        try {
+            $probeText = 'x' + [char]13 + [char]10 + 'y' + [char]1 + 'z' + [char]127 + [char]9 + 'w'
+            $sinkPath = Join-Path $scratch 'sink.log'
+            $sink = [TerminalOrganizer.App.LogSink]::new($sinkPath)
+            $sink.Append($probeText)
+            $sinkLine = @([IO.File]::ReadAllLines($sinkPath))[0]
+            $LogPath = Join-Path $scratch 'helper.log'
+            . (Import-HelperLogFunction)
+            Add-HelperLog $probeText
+            $helperLine = @([IO.File]::ReadAllLines($LogPath))[0]
+            $helperLine.Substring(20) | Should BeExactly $sinkLine.Substring(20)
+        }
+        finally { Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue }
+    }
+}

@@ -334,6 +334,9 @@ Describe 'AC-003 Normalizer and needle tokens (REQ-MAT-001)' {
 }
 
 Describe 'AC-004 Matcher (REQ-MAT-002)' {
+    # Card t17 re-based one expected value of this table (HG_MyProject): it is a single-token needle naming the
+    # whole session of tab 4105 (HG_MyProject), so the reverse rule now matches it. Multi-token needles keep the
+    # forward all-tokens rule only; the reverse rule's own rows live in AttentionSessionMatch.Tests.ps1.
     $rows = @(
         @{ Needle = 'hooks'; Expected = '4101,4102,4106' },
         @{ Needle = 'claude notification wsl2'; Expected = '4101' },
@@ -346,7 +349,7 @@ Describe 'AC-004 Matcher (REQ-MAT-002)' {
         @{ Needle = 'hooks claude'; Expected = '4102' },
         @{ Needle = 'hooks hooks'; Expected = '4101,4102,4106' },
         @{ Needle = 'Hooks'; Expected = '4101,4102,4106' },
-        @{ Needle = 'HG_MyProject'; Expected = '' },
+        @{ Needle = 'HG_MyProject'; Expected = '4105' },
         @{ Needle = 'myproject'; Expected = '4105' },
         @{ Needle = 'vhook'; Expected = '4106' },
         @{ Needle = 'dev hooks'; Expected = '4106' },
@@ -721,7 +724,7 @@ Describe 'AC-007 Controller: poll, consume, suppression, log lines (REQ-CTL-001,
         # SPEC-TRAY-019 AM-3: primary + one no-match line per session-bearing window
         # (the re-based fixture M has five: 4101/4102/4103/4105/4106).
         $script:AttentionLog.Count | Should Be 6
-        $script:AttentionLog[0] | Should BeExactly 'attention: event=stop needle="zzz" matched=0 (no window; taskbar flash remains)'
+        $script:AttentionLog[0] | Should BeExactly 'attention: event=stop needle="zzz" matched=0 (no window; no tray notice)'
         $script:FactoryCalls.Count | Should Be 0
     }
 

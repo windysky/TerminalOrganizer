@@ -215,6 +215,8 @@ if ($SelfTest) {
         ($ManualLabel.Length -eq 48 -and $ManualLabel.StartsWith('manual verification step') -and $ManualLabel.EndsWith('see morning checklist')) `
         'the pinned live-mode label'
 
+    # Keep this AC-011 block in step with the same block in tools\organize-dryrun.ps1. Each tool carries its own copy so a
+    # tool runs from a bare copy of its file; the fixtures are pinned values, so the two copies change together or not at all.
     # --- SPEC-RULES-009 AC-011 rows: rule-set composition and the shared provenance formatter ---
     # The preset-none fixture of plan.md J.3 (rule list U, default rank 450) goes through the same single
     # settings read, rule-set composition and identity-name facts the live path uses.

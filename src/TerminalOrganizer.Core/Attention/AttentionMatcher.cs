@@ -17,11 +17,18 @@ namespace TerminalOrganizer.Core.Attention
     /// for which TitleNormalizer.Parse reports PrefixPresent — and the token rule
     /// applies to the stripped SessionTitle; a title without a valid launcher prefix
     /// never produces a match (a path tab legitimately contains session-name
-    /// substrings after normalization, and never rings its window). Pure by contract
+    /// substrings after normalization, and never rings its window). A second, reverse
+    /// rule (t17) also matches a session title whose normalized form occurs inside the
+    /// needle's single normalized token and is at least AttentionConstants.MinReverseSessionLength
+    /// characters long: the producer's needle is the tmux session name, which can carry a
+    /// folder prefix the tab's session title lacks (needle jang_projectx, tab OC_projectx).
+    /// The reverse rule is for single-token needles only: with several tokens it would
+    /// degrade the all-tokens-in-one-title rule to any-token matching. The forward rule is
+    /// evaluated first, and the reverse rule never applies to a title without a launcher prefix. Pure by contract
     /// (NFR-2, REQ-STM-007): reads no file, clock or process, never throws, and
     /// obtains session titles solely through TitleNormalizer.Parse.
     /// </summary>
-    // @MX:NOTE: this rule is the producer contract, replicated exactly; one deliberate divergence below.
+    // @MX:NOTE: this rule is the producer contract, replicated exactly; two deliberate divergences: the zero-token needle (NeedleTokens) and the reverse rule for single-token needles (SessionTitleInNeedle, t17).
     // @MX:NOTE: SPEC-TRAY-019 session-title lens — grammar knowledge stays in TitleNormalizer (REQ-STM-007).
     public static class AttentionMatcher
     {
@@ -51,8 +58,9 @@ namespace TerminalOrganizer.Core.Attention
         /// <summary>
         /// The needle tokens (REQ-MAT-002): the whitespace-split parts of the needle,
         /// each normalized, with empty-normalized tokens dropped. A needle that leaves
-        /// zero tokens matches nothing — the ONE deliberate divergence from the producer,
-        /// whose all-empty token set vacuously matches every window; the safer variant
+        /// zero tokens matches nothing — the first of two deliberate divergences from the
+        /// producer (the second is the reverse rule, SessionTitleInNeedle), whose all-empty
+        /// token set vacuously matches every window; the safer variant
         /// is pinned here. Duplicate tokens and token order are both harmless.
         /// </summary>
         public static string[] NeedleTokens(string needle)
@@ -130,13 +138,16 @@ namespace TerminalOrganizer.Core.Attention
             bool canMatch = tokens.Length > 0;
             long handle = candidate.Handle.ToInt64();
             string matchedSessionTitle = null;
+            string matchedRule = null;
             string suppressedTitle = null;
+            // The reverse rule reads a single-token needle as the whole session name; a multi-token needle gets none (below).
+            string reverseNeedle = tokens.Length == 1 ? tokens[0] : null;
             List<string> sessionTitles = new List<string>();
-            EvaluateTitle(tokens, canMatch, candidate.WindowTitle, sessionTitles, ref matchedSessionTitle, ref suppressedTitle);
+            EvaluateTitle(tokens, reverseNeedle, canMatch, candidate.WindowTitle, sessionTitles, ref matchedSessionTitle, ref matchedRule, ref suppressedTitle);
             string[] tabTitles = candidate.TabTitles;
             for (int i = 0; i < tabTitles.Length; i++)
             {
-                EvaluateTitle(tokens, canMatch, tabTitles[i], sessionTitles, ref matchedSessionTitle, ref suppressedTitle);
+                EvaluateTitle(tokens, reverseNeedle, canMatch, tabTitles[i], sessionTitles, ref matchedSessionTitle, ref matchedRule, ref suppressedTitle);
             }
             bool matched = matchedSessionTitle != null;
             if (matched)
@@ -144,20 +155,30 @@ namespace TerminalOrganizer.Core.Attention
                 // A matched window has no suppressed over-match to report — its ring is correct.
                 suppressedTitle = null;
             }
-            return new AttentionMatchDetail(handle, matched, matchedSessionTitle, suppressedTitle, sessionTitles.ToArray());
+            return new AttentionMatchDetail(handle, matched, matchedSessionTitle, suppressedTitle, sessionTitles.ToArray(), matchedRule);
         }
 
         /// <summary>One title through the lens: a prefix-present title joins the session list and may attribute the match; a non-session title may attribute a suppression.</summary>
-        private static void EvaluateTitle(string[] tokens, bool canMatch, string title,
-            List<string> sessionTitles, ref string matchedSessionTitle, ref string suppressedTitle)
+        private static void EvaluateTitle(string[] tokens, string reverseNeedle, bool canMatch, string title,
+            List<string> sessionTitles, ref string matchedSessionTitle, ref string matchedRule, ref string suppressedTitle)
         {
             NormalizedTitle parsed = TitleNormalizer.Parse(title);
             if (parsed.PrefixPresent)
             {
                 sessionTitles.Add(parsed.SessionTitle);
-                if (canMatch && matchedSessionTitle == null && TitleMatches(tokens, parsed.SessionTitle))
+                if (canMatch && matchedSessionTitle == null)
                 {
-                    matchedSessionTitle = parsed.SessionTitle;
+                    // The forward rule is evaluated first; the reverse rule only when it fails (session titles only).
+                    if (TitleMatches(tokens, parsed.SessionTitle))
+                    {
+                        matchedSessionTitle = parsed.SessionTitle;
+                        matchedRule = AttentionMatchDetail.RuleForward;
+                    }
+                    else if (SessionTitleInNeedle(reverseNeedle, parsed.SessionTitle))
+                    {
+                        matchedSessionTitle = parsed.SessionTitle;
+                        matchedRule = AttentionMatchDetail.RuleReverse;
+                    }
                 }
                 return;
             }
@@ -165,6 +186,26 @@ namespace TerminalOrganizer.Core.Attention
             {
                 suppressedTitle = title;
             }
+        }
+
+        /// <summary>
+        /// The reverse rule (t17), for single-token needles only (reverseNeedle is null for any other token
+        /// count, because a multi-token needle would degrade to any-token matching): the session title's
+        /// normalized form occurs in the needle's token as an Ordinal substring, and is at least AttentionConstants.MinReverseSessionLength characters long (the
+        /// over-match guard: a very short tab name would otherwise match inside almost any long needle).
+        /// </summary>
+        private static bool SessionTitleInNeedle(string reverseNeedle, string sessionTitle)
+        {
+            if (string.IsNullOrEmpty(reverseNeedle) || string.IsNullOrEmpty(sessionTitle))
+            {
+                return false;
+            }
+            string normalized = Normalize(sessionTitle);
+            if (normalized.Length < AttentionConstants.MinReverseSessionLength)
+            {
+                return false;
+            }
+            return reverseNeedle.IndexOf(normalized, StringComparison.Ordinal) >= 0;
         }
 
         /// <summary>Every token's normalized form occurs in the title's normalized form (Ordinal substring).</summary>

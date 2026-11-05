@@ -2990,6 +2990,90 @@ Describe 'SPEC-RULES-009 AC-008 fresh and invalid settings' {
     Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
 }
 
+# Card t5 / SPEC-RULES-009 sync review F1: a file below schema 3 that already carries titleRules ignores the
+# block (REQ-SET-003) and the next save replaces it, so the load must say so once.
+Describe 'SPEC-RULES-009 review F1 a legacy-version file carrying titleRules reports it' {
+    $dir = New-R9TempDir
+    It 'a version-2, version-1 and unversioned file with a titleRules block each report one diagnostic and still migrate to preset launcher-prefix' {
+        $id = [guid]::NewGuid().ToString('N')
+        $block = '{"preset":"none","defaultRank":450,"rules":[{"match":"x' + $id + '*","rank":3}]}'
+        $files = @(
+            @('f1-v2.json', (Get-R9File 2 $block)),
+            @('f1-v1.json', (Get-R9File 1 $block)),
+            @('f1-v0.json', ($script:R9Unversioned.Substring(0, $script:R9Unversioned.Length - 1) + ',"titleRules":' + $block + '}'))
+        )
+        foreach ($case in $files) {
+            $s = (New-Object TerminalOrganizer.App.SettingsStore -ArgumentList (Write-R9File $dir $case[1] $case[0])).Load()
+            $s.TitleRules.Preset | Should BeExactly 'launcher-prefix'
+            @($s.TitleRules.RuleDefinitions).Count | Should Be 0
+            $s.SchemaVersion | Should Be 3
+            @($s.TitleRules.DiagnosticLines).Count | Should Be 1
+            $s.TitleRules.DiagnosticLines[0] | Should Match '^title rules: .*schemaVersion'
+        }
+    }
+    It 'the diagnostic is written to the sink once across repeated loads' {
+        $id = [guid]::NewGuid().ToString('N')
+        $path = Write-R9File $dir (Get-R9File 2 ('{"preset":"none","rules":[{"match":"y' + $id + '*"}]}')) 'f1-once.json'
+        $script:R9Lines = New-Object 'System.Collections.Generic.List[string]'
+        $sink = [Action[string]] { param($m) $script:R9Lines.Add($m) }
+        $store = [TerminalOrganizer.App.SettingsStore]::new($path, $sink)
+        1..3 | ForEach-Object { $null = $store.Load() }
+        $script:R9Lines.Count | Should Be 1
+        $script:R9Lines[0] | Should Match '^title rules: .*schemaVersion'
+    }
+    It 'a version-2 file without a titleRules block reports nothing' {
+        $path = Write-R9File $dir $script:R9V2 'f1-clean.json'
+        $s = (New-Object TerminalOrganizer.App.SettingsStore -ArgumentList $path).Load()
+        @($s.TitleRules.DiagnosticLines).Count | Should Be 0
+    }
+    Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
+}
+
+# Card t5 / SPEC-RULES-009 sync review F2: a titleRules value nested past the serializer's default recursion
+# limit must degrade only titleRules (REQ-SET-001), never the rest of the file.
+Describe 'SPEC-RULES-009 review F2 deeply nested titleRules degrade only the block' {
+    $dir = New-R9TempDir
+    It 'titleRules nested 150, 220 and 98 levels deep keeps the hotkey, manager, overrides and policy, reports one diagnostic, and a save keeps the nested value' {
+        foreach ($depth in @(150, 220, 98)) {
+            $nested = ('[' * $depth) + (']' * $depth)
+            $path = Write-R9File $dir (Get-R9File 3 $nested) ('f2-' + $depth + '.json')
+            $store = [TerminalOrganizer.App.SettingsStore]::new($path)
+            $s = $store.Load()
+            $s.Hotkey | Should BeExactly 'Ctrl+Alt+O'
+            $s.ManagerSelector.Value | Should BeExactly 'YODA1'
+            @($s.PriorityOverrides).Count | Should Be 1
+            $s.OverflowPolicy.ToString() | Should BeExactly 'Stack'
+            $s.SchemaVersion | Should Be 3
+            $s.TitleRules.Preset | Should BeExactly 'none'
+            @($s.TitleRules.RuleDefinitions).Count | Should Be 0
+            @($s.TitleRules.DiagnosticLines).Count | Should Be 1
+            $s.TitleRules.DiagnosticLines[0] | Should Match '^title rules: .*nested'
+            $store.Save($s)
+            [IO.File]::ReadAllText($path).Contains('"titleRules":' + $nested) | Should Be $true
+            $store.Load().Hotkey | Should BeExactly 'Ctrl+Alt+O'
+        }
+    }
+    It 'a value nested past the reader limit (300 levels) still never throws: the whole file loads as the defaults' {
+        $nested = ('[' * 300) + (']' * 300)
+        $path = Write-R9File $dir (Get-R9File 3 $nested) 'f2-300.json'
+        $caught = $null
+        $s = $null
+        try { $s = (New-Object TerminalOrganizer.App.SettingsStore -ArgumentList $path).Load() } catch { $caught = $_ }
+        $caught | Should BeNullOrEmpty
+        $s.Hotkey | Should BeExactly 'Ctrl+Alt+O'
+        $s.TitleRules.Preset | Should BeExactly 'none'
+        $s.ManagerSelector.IsEmpty | Should Be $true
+    }
+    It 'a legacy-version file whose titleRules is deeply nested also keeps the rest of the file' {
+        $nested = ('[' * 150) + (']' * 150)
+        $path = Write-R9File $dir (Get-R9File 2 $nested) 'f2-legacy.json'
+        $s = (New-Object TerminalOrganizer.App.SettingsStore -ArgumentList $path).Load()
+        $s.Hotkey | Should BeExactly 'Ctrl+Alt+O'
+        $s.TitleRules.Preset | Should BeExactly 'launcher-prefix'
+    }
+    Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
+}
+
 Describe 'SPEC-RULES-009 AC-009 round trip and re-read' {
     $dir = New-R9TempDir
     $extended = '{"preset":"launcher-prefix","defaultRank":450,"rules":[' + $script:R9RuleListU + ',{"match":"a","rank":"high"},{"match":"b*","rank":20,"note":"x"}]}'
@@ -3451,12 +3535,20 @@ Describe 'SPEC-RULES-009 AC-015 organize run pins the manager by identity' {
         $result.FinalPlan.ManagerPinned | Should Be $true
     }
     It 'the menu resolution and the run name the same manager window' {
+        # One fixture feeds both sides (sync review F7): the menu resolves it directly, the run resolves it
+        # through the controller, and both must name the same window.
+        $h = New-CController
+        $fact = New-CFact 'ssh server1 -v' -Top 100 -Left 100
+        $snap = (Get-R9Snapshots @((New-R9Acquired ([long]$script:CHandles['ssh server1 -v'].ToInt64()) @('ssh server1 -v'))) @() $rules)[0]
+        $script:CFacts = @($fact)
+        $script:CSnaps = @($snap)
         $selector = New-R9Selector 'Identity' 'server1' 'ssh server1'
-        $snap = (Get-R9Snapshots @((New-R9Acquired 61 @('ssh server1 -v'))) @() $rules)[0]
-        $fact = New-R9Fact 'w61' 61 'ssh server1 -v'
         $menu = [TerminalOrganizer.Core.Assignment.ManagerResolver]::Resolve($selector,
             [TerminalOrganizer.Core.Assignment.WindowFact[]]@($fact), [TerminalOrganizer.Core.Windows.WindowSnapshot[]]@($snap))
-        $menu.WindowId | Should BeExactly 'w61'
+        $menu.WindowId | Should BeExactly 'ssh server1 -v'
+        $result = $h.Controller.Run((New-TMonitor 1), 'ssh server1', $false, 'M1', $null, [System.Threading.CancellationToken]::None, $selector)
+        $result.FinalPlan.ManagerPinned | Should Be $true
+        $result.FinalPlan.ManagerWindowId | Should BeExactly $menu.WindowId
     }
 }
 

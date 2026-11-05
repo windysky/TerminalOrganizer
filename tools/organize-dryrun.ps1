@@ -222,6 +222,8 @@ if ($SelfTest) {
         $b5Facts.Length -eq 1 -and $b5Plan.Moves.Count -eq 1 -and $b5Plan.Moves[0].WindowId -ceq 'B5W4201'
     Assert-Check 'b5/no-cross-monitor-facts' $b5Ok 'monitor 1 scopes to window 4201 only and plans exactly one move'
 
+    # Keep this AC-011 block in step with the same block in tools\organize-once.ps1. Each tool carries its own copy so a
+    # tool runs from a bare copy of its file; the fixtures are pinned values, so the two copies change together or not at all.
     # --- SPEC-RULES-009 AC-011 rows: rule-set composition and the shared provenance formatter ---
     # The preset-none fixture of plan.md J.3 (rule list U, default rank 450) goes through the same single
     # settings read, rule-set composition and identity-name facts the live path uses.

@@ -179,6 +179,15 @@ Describe 'AC-009 message layout and truncation' {
         $c::MessageCloseSizePx | Should Be 16
     }
 
+    It 'paints the amber accent as a full border on all four edges, not only a left stripe (2026-11-05 dark-terminal fix)' {
+        $src = Read-Source $script:PanelCsPath
+        $src.Contains('int border = AttentionConstants.MessageAccentPx;') | Should Be $true
+        $src.Contains('FillRectangle(accent, 0, 0, width, border)') | Should Be $true
+        $src.Contains('FillRectangle(accent, 0, height - border, width, border)') | Should Be $true
+        $src.Contains('FillRectangle(accent, 0, 0, border, height)') | Should Be $true
+        $src.Contains('FillRectangle(accent, width - border, 0, border, height)') | Should Be $true
+    }
+
     It 'pins the section-J color constants (panel 0x1E1E1E, text 0xEEEEEE)' {
         $c = [TerminalOrganizer.Core.Attention.AttentionConstants]
         $c::MessagePanelBackRgb | Should Be 0x1E1E1E

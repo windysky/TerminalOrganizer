@@ -673,6 +673,10 @@ namespace TerminalOrganizer.App
         // SPEC-TRAY-020: the update checker, the app-log path handed to the detached
         // helper (LogSink keeps its path private), and the one-shot startup-check timer.
         private readonly UpdateChecker updateChecker;
+        // True only for a repo checkout (UpdateChecker.DeriveRepoRoot() != null), derived once at
+        // construction: it gates the two update menu rows and the startup check, so a release-zip
+        // install (no .git) shows no update UI at all.
+        private readonly bool updateSupported;
         private readonly string logPath;
         private System.Windows.Forms.Timer startupUpdateTimer;
         private const string TopologyRerunSource = "topology-rerun";
@@ -699,7 +703,9 @@ namespace TerminalOrganizer.App
             // SPEC-TRAY-020: the update checker over the same log; the log path is the
             // helper's -LogPath argument (the detached helper appends to the app log).
             this.logPath = string.IsNullOrEmpty(current.LogPath) ? SettingsStore.DefaultLogPath() : current.LogPath;
-            this.updateChecker = UpdateChecker.CreateProduction(this.log, UpdateChecker.DeriveRepoRoot());
+            string updateRepoRoot = UpdateChecker.DeriveRepoRoot();
+            this.updateSupported = updateRepoRoot != null;
+            this.updateChecker = UpdateChecker.CreateProduction(this.log, updateRepoRoot);
             this.ports = Composition.Build(this.log, new LabelRegistry());
             this.ports.Balloon = delegate(NoticeMessage message) { ShowBalloon(message.Text, message.Level); };
             this.messageWindow = new HotkeyWindow(null);
@@ -722,6 +728,10 @@ namespace TerminalOrganizer.App
                 AttentionSignalDirectory(), current.AttentionOverlay, current.AttentionEventPolicy,
                 current.AttentionStopBlinkLimit, current.AttentionOverlayTopmost,
                 current.AttentionInfoVisibleSeconds);
+            // Card t18: a signal that rings no window gets a tray balloon, because the producer skips its own
+            // toast and flash while the organizer heartbeat is fresh.
+            this.attention.SetZeroMatchNotice(
+                delegate(string title, string text) { ShowAttentionBalloon(title, text); }, null);
             if (!current.AttentionOverlay)
             {
                 // D-2 default ON; an explicit false in the file starts the controller disabled.
@@ -782,6 +792,15 @@ namespace TerminalOrganizer.App
                     : level == NoticeLevel.Warning ? ToolTipIcon.Warning
                     : ToolTipIcon.Info;
                 this.icon.ShowBalloonTip(5000, "TerminalOrganizer", text, icon);
+            }
+        }
+
+        /// <summary>Card t18: the attention zero-match notice as an Info balloon with its own title (the notice-table balloons all carry the app title).</summary>
+        private void ShowAttentionBalloon(string title, string text)
+        {
+            if (this.icon != null)
+            {
+                this.icon.ShowBalloonTip(5000, title, text, ToolTipIcon.Info);
             }
         }
 
@@ -1143,7 +1162,7 @@ namespace TerminalOrganizer.App
                 this.lastResultText, current.MergeEnabled, current.OverflowPolicy, rowTexts,
                 current.AttentionOverlay, current.AttentionEventPolicy,
                 current.AttentionStopBlinkLimit, current.AttentionOverlayTopmost,
-                attentionRadioSubmenus: true, supportsUpdate: true);
+                attentionRadioSubmenus: true, supportsUpdate: this.updateSupported);
         }
 
         /// <summary>Walks the live tree (the busy-flip shape): every settings-mutation
@@ -1255,8 +1274,8 @@ namespace TerminalOrganizer.App
             try
             {
                 AppSettings current = settings.Load();
-                // B2: the canonical selector's raw-title fallback drives the legacy
-                // string path (the controller's manager matching stays raw-title/ordinal).
+                // B2: the canonical selector rides along (REQ-ID-004); its raw-title fallback is the legacy
+                // string the controller falls back to when the selector is empty or does not resolve to one window.
                 ManagerSelector selector = current.ManagerSelector == null ? ManagerSelector.None() : current.ManagerSelector;
                 // B3: the full-set physical label (same derivation the menu rows use) and
                 // the configured log path ride the run so the status can carry both.
@@ -1814,7 +1833,7 @@ namespace TerminalOrganizer.App
             {
                 prompt.Width = 380;
                 prompt.Height = 160;
-                prompt.Text = "Label unidentified window";
+                prompt.Text = "Label window";
                 prompt.FormBorderStyle = FormBorderStyle.FixedDialog;
                 prompt.StartPosition = FormStartPosition.CenterScreen;
                 prompt.MinimizeBox = false;
@@ -1855,6 +1874,13 @@ namespace TerminalOrganizer.App
         // @MX:NOTE: [SPEC-TRAY-020] one-shot delayed startup check; behind-only notify (D-6), never a spawn or an exit.
         private void ArmStartupUpdateCheck()
         {
+            if (!this.updateSupported)
+            {
+                // Not a repo checkout (release-zip install): nothing to compare against, so the
+                // startup check stays silent - one log line, no timer, no balloon.
+                this.log.Append("update: startup check skipped reason=not-a-repo-checkout");
+                return;
+            }
             this.startupUpdateTimer = new System.Windows.Forms.Timer();
             this.startupUpdateTimer.Interval = UpdateChecker.StartupCheckDelayMs;
             this.startupUpdateTimer.Tick += delegate

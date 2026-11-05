@@ -69,7 +69,7 @@ Settings-type rows — the attention overlay options, the overflow policy choice
 
 Every window gets an identity name and a rank from its tab titles. Priorities matter when windows overflow: **the lowest-priority windows are moved first** (a lower number means a higher priority).
 
-The rules live in `%LOCALAPPDATA%\TerminalOrganizer\settings.json`, in the `titleRules` block. The tray menu has no rule editor; edit the file, and the next organize run, menu rebuild or tool run picks the change up without a restart. Rules are only read from a settings file with `"schemaVersion": 3`. A file that still says 2 (or an older number, or no version) gets its `titleRules` block ignored and replaced with the launcher-prefix default the next time the app saves, so check that the version is 3 before you add rules. The app writes 3 the first time it saves settings after the upgrade, for example after you choose a manager window.
+The rules live in `%LOCALAPPDATA%\TerminalOrganizer\settings.json`, in the `titleRules` block. The tray menu has no rule editor; edit the file, and the next organize run, menu rebuild or tool run picks the change up without a restart. Rules are only read from a settings file with `"schemaVersion": 3`. A file that still says 2 (or an older number, or no version) gets its `titleRules` block ignored (the log says so once) and replaced with the launcher-prefix default the next time the app saves, so check that the version is 3 before you add rules. The app writes 3 the first time it saves settings after the upgrade, for example after you choose a manager window.
 
 ```json
 "titleRules": {

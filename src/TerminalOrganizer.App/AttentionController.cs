@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 using TerminalOrganizer.Core.Attention;
@@ -749,7 +750,9 @@ namespace TerminalOrganizer.App
                     if (details[i].Matched)
                     {
                         Log("attention: match hwnd=" + details[i].Handle.ToString(CultureInfo.InvariantCulture)
-                            + " session-tab=\"" + details[i].MatchedSessionTitle + "\"");
+                            + " session-tab=\"" + details[i].MatchedSessionTitle + "\""
+                            // t17: only a reverse match names its rule, so the forward lines stay byte-identical.
+                            + (details[i].MatchRule == AttentionMatchDetail.RuleReverse ? " rule=reverse" : string.Empty));
                     }
                     else if (details[i].SuppressedTitle != null)
                     {
@@ -759,9 +762,19 @@ namespace TerminalOrganizer.App
                 }
                 return;
             }
-            // Zero-match (REQ-CTL-003): the producer's taskbar flash stays the fallback cue (D-1).
+            // Zero-match (REQ-CTL-003, amended by card t18): the producer skips its toast and taskbar flash
+            // while the organizer heartbeat is fresh (SPEC-TRAY-016), so a signal that rings no window would
+            // leave no cue at all. The organizer therefore raises the fallback cue itself: a tray notice
+            // through the injected seam, once per needle per cooldown. Only signals that reached this match
+            // run get here, so the disabled switch and the event policy have already filtered the rest.
+            string noticeFailure;
+            string noticeOutcome = RaiseZeroMatchNotice(signal, out noticeFailure);
             Log("attention: event=" + signal.Event + " needle=\"" + signal.Needle
-                + "\" matched=0 (no window; taskbar flash remains)");
+                + "\" matched=0 (no window; " + noticeOutcome + ")");
+            if (noticeFailure != null)
+            {
+                Log("attention: tray notice failed: " + noticeFailure);
+            }
             // SPEC-TRAY-019 (REQ-STM-005): one line per session-bearing window, naming its
             // stripped session titles — the zero-match dump (plan.md A-3).
             for (int i = 0; i < details.Length; i++)
@@ -772,6 +785,121 @@ namespace TerminalOrganizer.App
                         + " session-tabs=\"" + string.Join("|", details[i].SessionTitles) + "\"");
                 }
             }
+        }
+
+        /// <summary>
+        /// t18: installs the zero-match fallback cue. The notice seam receives the notice title and body
+        /// (the production wiring shows them as a tray balloon); the clock seam returns Unix epoch
+        /// milliseconds for the per-needle cooldown (null uses the production clock). A null notice seam
+        /// means no notice, which is the state of every constructor until this is called.
+        /// </summary>
+        public void SetZeroMatchNotice(Action<string, string> notice, Func<long> nowMs)
+        {
+            zeroMatchNotice = notice;
+            zeroMatchClock = nowMs;
+        }
+
+        // t18: the zero-match notice seam, its clock and the per-needle last-notice time (UI thread only).
+        private Action<string, string> zeroMatchNotice;
+        private Func<long> zeroMatchClock;
+        private readonly Dictionary<string, long> zeroMatchNoticedAt = new Dictionary<string, long>(StringComparer.Ordinal);
+
+        private const string ZeroMatchNoticeTitle = "Claude needs attention";
+        private const int ZeroMatchMessageMaxChars = 200;
+        private const int ZeroMatchNeedleMaxChars = 100;
+
+        /// <summary>
+        /// Raises the zero-match tray notice for one signal and returns the log phrase for the outcome:
+        /// "no tray notice" (no seam), "tray notice shown", "tray notice suppressed, cooldown" (the same
+        /// needle, normalized as the matcher does, was noticed less than the cooldown ago) or
+        /// "tray notice failed" (the seam threw; the failure text comes back through failure and the
+        /// cooldown is not started, so the next signal may try again). Never throws.
+        /// </summary>
+        private string RaiseZeroMatchNotice(AttentionSignal signal, out string failure)
+        {
+            failure = null;
+            Action<string, string> notice = zeroMatchNotice;
+            if (notice == null)
+            {
+                return "no tray notice";
+            }
+            long now = (zeroMatchClock == null ? UtcNowEpochMs() : zeroMatchClock());
+            string key = AttentionMatcher.Normalize(signal.Needle);
+            if (key.Length == 0)
+            {
+                key = signal.Needle ?? string.Empty;
+            }
+            long last;
+            if (zeroMatchNoticedAt.TryGetValue(key, out last)
+                && now - last < AttentionConstants.ZeroMatchNoticeCooldownMs)
+            {
+                return "tray notice suppressed, cooldown";
+            }
+            try
+            {
+                notice(ZeroMatchNoticeTitle, ZeroMatchNoticeBody(signal));
+            }
+            catch (Exception ex)
+            {
+                failure = ex.Message;
+                return "tray notice failed";
+            }
+            RememberZeroMatchNotice(key, now);
+            return "tray notice shown";
+        }
+
+        private void RememberZeroMatchNotice(string key, long now)
+        {
+            // Entries past the cooldown can never suppress anything again; drop them so the map stays small.
+            List<string> expired = new List<string>();
+            foreach (KeyValuePair<string, long> entry in zeroMatchNoticedAt)
+            {
+                if (now - entry.Value >= AttentionConstants.ZeroMatchNoticeCooldownMs)
+                {
+                    expired.Add(entry.Key);
+                }
+            }
+            for (int i = 0; i < expired.Count; i++)
+            {
+                zeroMatchNoticedAt.Remove(expired[i]);
+            }
+            zeroMatchNoticedAt[key] = now;
+        }
+
+        /// <summary>The notice body: no window was found for the session, then the signal's message when it has one (one line, bounded).</summary>
+        private static string ZeroMatchNoticeBody(AttentionSignal signal)
+        {
+            string needle = OneLine(signal.Needle, ZeroMatchNeedleMaxChars);
+            string body = "No window was found for session \"" + needle + "\".";
+            string message = OneLine(signal.Message, ZeroMatchMessageMaxChars);
+            return message.Length == 0 ? body : body + " " + message;
+        }
+
+        /// <summary>Folds every whitespace run (line breaks included) to one space, trims, and bounds the result to max characters (three fewer plus "...").</summary>
+        private static string OneLine(string text, int max)
+        {
+            if (string.IsNullOrEmpty(text))
+            {
+                return string.Empty;
+            }
+            StringBuilder folded = new StringBuilder(text.Length);
+            bool pendingSpace = false;
+            for (int i = 0; i < text.Length; i++)
+            {
+                if (char.IsWhiteSpace(text[i]))
+                {
+                    pendingSpace = folded.Length > 0;
+                    continue;
+                }
+                if (pendingSpace)
+                {
+                    folded.Append(' ');
+                    pendingSpace = false;
+                }
+                folded.Append(text[i]);
+            }
+            string result = folded.ToString();
+            return result.Length <= max ? result : result.Substring(0, max - 3) + "...";
         }
 
         /// <summary>REQ-CTL-004: one overlay per handle; an active handle restarts its blink

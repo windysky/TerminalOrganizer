@@ -36,6 +36,15 @@ namespace TerminalOrganizer.Core.Attention
         /// keeps this non-blinking ring until the user attends to the window.</summary>
         public const int RingDimColorRgb = 0x7F5F00;
 
+        /// <summary>t17 (the reverse-containment rule): the reverse rule applies only to a session
+        /// title whose normalized form is at least this many characters long, so a very short tab name
+        /// cannot ring a window just because it happens to occur inside a long needle.</summary>
+        public const int MinReverseSessionLength = 4;
+
+        /// <summary>t18: the tray notice raised when a consumed signal matches no window is shown at most
+        /// once per needle (normalized as the matcher does) within this many milliseconds.</summary>
+        public const long ZeroMatchNoticeCooldownMs = 60000;
+
         // @MX:NOTE: SPEC-TRAY-016 message-constant block (plan.md section J): the pinned
         // panel geometry/typography set — changing any value here is a SPEC amendment,
         // never a tuning knob (the same doctrine as every constant above).
@@ -49,7 +58,7 @@ namespace TerminalOrganizer.Core.Attention
         /// <summary>The panel inner padding on all sides.</summary>
         public const int MessagePaddingPx = 10;
 
-        /// <summary>The amber left-stripe width; the stripe color is RingColorRgb.</summary>
+        /// <summary>The amber card border width (all four edges since 2026-11-05; was a left stripe); the color is RingColorRgb.</summary>
         public const int MessageAccentPx = 3;
 
         /// <summary>The panel background #1E1E1E (near-black, solid — the panel has NO TransparencyKey).</summary>
@@ -240,13 +249,28 @@ namespace TerminalOrganizer.Core.Attention
     /// </summary>
     public sealed class AttentionMatchDetail
     {
+        /// <summary>The rule name of a match by the forward rule (every needle token inside the session title).</summary>
+        public const string RuleForward = "forward";
+
+        /// <summary>The rule name of a match by the reverse rule (the session title inside the joined needle, t17).</summary>
+        public const string RuleReverse = "reverse";
+
+        /// <summary>The original form: a matched window is attributed to the forward rule.</summary>
         public AttentionMatchDetail(long handle, bool matched, string matchedSessionTitle,
             string suppressedTitle, string[] sessionTitles)
+            : this(handle, matched, matchedSessionTitle, suppressedTitle, sessionTitles, matched ? RuleForward : null)
+        {
+        }
+
+        /// <summary>Also names the rule that produced the match (RuleForward or RuleReverse); null for an unmatched window.</summary>
+        public AttentionMatchDetail(long handle, bool matched, string matchedSessionTitle,
+            string suppressedTitle, string[] sessionTitles, string matchRule)
         {
             Handle = handle;
             Matched = matched;
             MatchedSessionTitle = matchedSessionTitle;
             SuppressedTitle = suppressedTitle;
+            MatchRule = matched ? matchRule : null;
             this.sessionTitles = sessionTitles == null ? new string[0] : (string[])sessionTitles.Clone();
         }
 
@@ -254,6 +278,9 @@ namespace TerminalOrganizer.Core.Attention
         public bool Matched { get; private set; }
         public string MatchedSessionTitle { get; private set; }
         public string SuppressedTitle { get; private set; }
+
+        /// <summary>RuleForward or RuleReverse for a matched window; null when unmatched.</summary>
+        public string MatchRule { get; private set; }
 
         private readonly string[] sessionTitles;
 

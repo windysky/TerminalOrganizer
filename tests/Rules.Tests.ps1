@@ -232,6 +232,74 @@ Describe 'AC-004 Malformed, runaway and hostile input' {
     }
 }
 
+# Card t2 / SPEC-RULES-008 review F2: the public RuleSet and CompiledRule constructors admit a null
+# rule element and a Regex-kind rule with a null Regex; evaluation must still never throw.
+function New-GlobCompiledRule([int]$Position, [string]$Pattern, [string]$FixedName) {
+    New-Object TerminalOrganizer.Core.Rules.CompiledRule($Position,
+        [TerminalOrganizer.Core.Rules.RuleKind]::Glob,
+        [TerminalOrganizer.Core.Rules.RuleSubject]::Title,
+        $Pattern, $null, $null, $FixedName, $null, ('rule ' + $Position + ': ' + $Pattern), $false)
+}
+
+function New-NullRegexCompiledRule([int]$Position) {
+    New-Object TerminalOrganizer.Core.Rules.CompiledRule($Position,
+        [TerminalOrganizer.Core.Rules.RuleKind]::Regex,
+        [TerminalOrganizer.Core.Rules.RuleSubject]::Title,
+        'x', $null, $null, $null, $null, ('rule ' + $Position + ': regex:x'), $false)
+}
+
+function New-HandBuiltRuleSet($Rules) {
+    New-Object TerminalOrganizer.Core.Rules.RuleSet($Rules, $null, $false)
+}
+
+Describe 'AC-004 Hand-built rule sets with null elements never throw' {
+    It 'a null rule element is skipped and the next valid rule still decides' {
+        $rules = New-Object 'TerminalOrganizer.Core.Rules.CompiledRule[]' 2
+        $rules[1] = New-GlobCompiledRule 2 'abc' 'ok'
+        $rs = New-HandBuiltRuleSet $rules
+        $caught = $null
+        $r = $null
+        try { $r = Eval-Tab $rs 'abc' } catch { $caught = $_ }
+        $caught | Should BeNullOrEmpty
+        $r.Matched | Should Be $true
+        $r.Name | Should BeExactly 'ok'
+        $r.Reference | Should BeExactly 'rule 2: abc'
+    }
+
+    It 'a Regex-kind rule with a null Regex does not match and the next valid rule still decides' {
+        $rules = New-Object 'TerminalOrganizer.Core.Rules.CompiledRule[]' 2
+        $rules[0] = New-NullRegexCompiledRule 1
+        $rules[1] = New-GlobCompiledRule 2 'abc' 'ok'
+        $rs = New-HandBuiltRuleSet $rules
+        $caught = $null
+        $r = $null
+        try { $r = Eval-Tab $rs 'abc' } catch { $caught = $_ }
+        $caught | Should BeNullOrEmpty
+        $r.Matched | Should Be $true
+        $r.Reference | Should BeExactly 'rule 2: abc'
+    }
+
+    It 'a set holding only a null element and a null-Regex rule matches nothing and names the tab by its trimmed title' {
+        $rules = New-Object 'TerminalOrganizer.Core.Rules.CompiledRule[]' 2
+        $rules[1] = New-NullRegexCompiledRule 2
+        $rs = New-HandBuiltRuleSet $rules
+        $caught = $null
+        $r = $null
+        $w = $null
+        try {
+            $r = Eval-Tab $rs '  abc  '
+            $state = New-Object TerminalOrganizer.Core.Rules.RuleEvaluationState
+            $tab = New-Object TerminalOrganizer.Core.Windows.TabSnapshot('  tab  ', 'tab', $null)
+            $w = [TerminalOrganizer.Core.Rules.RuleEvaluator]::EvaluateWindow($rs, ([TerminalOrganizer.Core.Windows.TabSnapshot[]]@($tab)), 'win', $state)
+        }
+        catch { $caught = $_ }
+        $caught | Should BeNullOrEmpty
+        $r.Matched | Should Be $false
+        $r.Name | Should BeExactly 'abc'
+        $w.IdentityName | Should BeExactly 'tab'
+    }
+}
+
 Describe 'AC-005 Marker rule' {
     It 'a marker title gives the identity without the token and the rank of the digits' {
         $u = Build-Rules (New-RuleListU)
@@ -403,6 +471,28 @@ Describe 'AC-008 PRESET-PARITY' {
             ($null -eq $r.Name) | Should Be $true
             $r.Rank | Should BeNullOrEmpty
             $r.Matched | Should Be $false
+        }
+    }
+
+    # Card t2 / review F1: as-built resolution of REQ-PRE-001 vs REQ-RUL-001 for a whitespace-only session title.
+    It 'a preset-matched title with a whitespace-only session title: the engine falls back to the trimmed whole title, the normalizer keeps the whitespace, rank and reference agree' {
+        $preset = Build-Rules $null $true
+        $rows = @(
+            @{ Title = 'OC_ '; Name = 'OC_'; Rank = $null },
+            @{ Title = 'HG2_  '; Name = 'HG2_'; Rank = 2 },
+            @{ Title = ('OC_' + [char]10); Name = 'OC_'; Rank = $null }
+        )
+        foreach ($row in $rows) {
+            $engine = Eval-Tab $preset $row.Title
+            $parsed = [TerminalOrganizer.Core.Windows.TitleNormalizer]::Parse($row.Title)
+            $engine.Matched | Should Be $true
+            $engine.Name | Should BeExactly $row.Name
+            $engine.Reference | Should BeExactly 'preset launcher-prefix'
+            $parsed.PrefixPresent | Should Be $true
+            [string]::IsNullOrWhiteSpace($parsed.SessionTitle) | Should Be $true
+            ($parsed.SessionTitle.Length -gt 0) | Should Be $true
+            $engine.Rank | Should Be $row.Rank
+            $parsed.DeclaredRank | Should Be $row.Rank
         }
     }
 }

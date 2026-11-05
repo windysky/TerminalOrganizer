@@ -88,7 +88,7 @@ namespace TerminalOrganizer.App
         /// <summary>
         /// C3 schema-v2 form: also carries the settings schema version, the persisted
         /// overflow policy and the cross-monitor mirror. The legacy constructors default
-        /// to schema 2 / Ask / false, so every pre-C3 read-modify-write keeps working.
+        /// to DefaultSchemaVersion (3) / Ask / false, so every pre-C3 read-modify-write keeps working.
         /// </summary>
         public AppSettings(string hotkey, string logPath, string managerWindowName, bool mergeEnabled,
             bool firstRunCompleted, bool startWithWindows, ManagerSelector managerSelector,
@@ -227,7 +227,7 @@ namespace TerminalOrganizer.App
             get { return (PriorityOverride[])priorityOverrides.Clone(); }
         }
 
-        /// <summary>The C3 settings schema version (a legacy file without the field loads as 2).</summary>
+        /// <summary>The C3 settings schema version (a file at version 0, 1 or 2, or without the field, loads as 3; a higher version is kept).</summary>
         public int SchemaVersion { get { return schemaVersion; } }
 
         /// <summary>The C3 persisted overflow policy; the default and every unknown text load as Ask.</summary>
@@ -341,9 +341,36 @@ namespace TerminalOrganizer.App
         }
 
         /// <summary>
+        /// The migration value for a file below schema 3 that already carries a titleRules block (sync review F1):
+        /// the block is ignored (REQ-SET-003) and the next save replaces it, so the read reports that once.
+        /// </summary>
+        public static TitleRulesSettings Migrated(object ignoredBlock)
+        {
+            if (ignoredBlock == null)
+            {
+                return Migrated();
+            }
+            List<string> lines = new List<string>();
+            List<string> keys = new List<string>();
+            AddSettingDiagnostic(lines, keys,
+                "titleRules is ignored because schemaVersion is below 3; set schemaVersion to 3 to use it (the next save replaces it)",
+                ignoredBlock);
+            return new TitleRulesSettings(false, null, true, DefaultRankValue, null, lines, keys);
+        }
+
+        /// <summary>
+        /// The deepest nesting, counted from the block itself, that the title-rules reader accepts. A real block
+        /// (block, rules, rule, a few values) is under 8 levels; anything deeper is read as invalid (sync review F2).
+        /// </summary>
+        public const int MaxBlockDepth = 32;
+
+        /// <summary>
         /// Reads the title-rules block from its generic JSON form (null when the file has none). Never throws:
         /// a part that is not valid loads as its default with one diagnostic and keeps its original value.
         /// </summary>
+        // JSON null and an absent key both reach this method as a null block: the serializer maps them to the same
+        // null field, so a null titleRules is read as absent (the fresh value, no diagnostic) and the next save
+        // writes an explicit block in its place (sync review F8; documented, not distinguishable).
         public static TitleRulesSettings FromBlock(object block)
         {
             if (block == null)
@@ -352,6 +379,12 @@ namespace TerminalOrganizer.App
             }
             List<string> lines = new List<string>();
             List<string> keys = new List<string>();
+            if (ExceedsDepth(block, MaxBlockDepth))
+            {
+                // The value is kept verbatim for a save; it is not described in the log key (it may be huge).
+                AddSettingDiagnostic(lines, keys, "titleRules is nested more than " + MaxBlockDepth + " levels deep", null);
+                return new TitleRulesSettings(true, block, false, DefaultRankValue, null, lines, keys);
+            }
             try
             {
                 System.Collections.IDictionary map = block as System.Collections.IDictionary;
@@ -486,6 +519,43 @@ namespace TerminalOrganizer.App
             }
         }
 
+        /// <summary>
+        /// True when the value nests containers (objects or arrays) more than limit levels deep, the value itself
+        /// being level 1. Iterative, so a hostile value cannot exhaust the stack.
+        /// </summary>
+        private static bool ExceedsDepth(object value, int limit)
+        {
+            Stack<KeyValuePair<object, int>> pending = new Stack<KeyValuePair<object, int>>();
+            pending.Push(new KeyValuePair<object, int>(value, 1));
+            while (pending.Count > 0)
+            {
+                KeyValuePair<object, int> current = pending.Pop();
+                System.Collections.IEnumerable children = null;
+                System.Collections.IDictionary map = current.Key as System.Collections.IDictionary;
+                if (map != null)
+                {
+                    children = map.Values;
+                }
+                else if (current.Key is System.Collections.IEnumerable && !(current.Key is string))
+                {
+                    children = (System.Collections.IEnumerable)current.Key;
+                }
+                if (children == null)
+                {
+                    continue;
+                }
+                if (current.Value > limit)
+                {
+                    return true;
+                }
+                foreach (object child in children)
+                {
+                    pending.Push(new KeyValuePair<object, int>(child, current.Value + 1));
+                }
+            }
+            return false;
+        }
+
         private static object Field(System.Collections.IDictionary map, string key)
         {
             return map.Contains(key) ? map[key] : null;
@@ -570,6 +640,21 @@ namespace TerminalOrganizer.App
     {
         /// <summary>The D-3 default hotkey string.</summary>
         public const string DefaultHotkey = "Ctrl+Alt+O";
+
+        /// <summary>
+        /// The JSON reader and writer nesting limit (the serializer default is 100). It sits well above
+        /// TitleRulesSettings.MaxBlockDepth so a deeply nested titleRules value is read, reported and kept as one
+        /// invalid part instead of failing the whole file (REQ-SET-001, sync review F2); it stays far below any
+        /// stack risk. A file nested deeper than this still degrades to the defaults, as any malformed file does.
+        /// </summary>
+        private const int SerializerRecursionLimit = 256;
+
+        private static JavaScriptSerializer NewSerializer()
+        {
+            JavaScriptSerializer serializer = new JavaScriptSerializer();
+            serializer.RecursionLimit = SerializerRecursionLimit;
+            return serializer;
+        }
 
         /// <summary>SPEC-TRAY-014 D-9: the absent-key stop blink limit (clamped 1..50 on load).</summary>
         public const int DefaultStopBlinkLimit = 10;
@@ -670,7 +755,7 @@ namespace TerminalOrganizer.App
                     return Defaults();
                 }
                 string json = File.ReadAllText(path);
-                SettingsDto dto = new JavaScriptSerializer().Deserialize<SettingsDto>(json);
+                SettingsDto dto = NewSerializer().Deserialize<SettingsDto>(json);
                 if (dto == null)
                 {
                     Degrade("settings file content was not a settings object; loading defaults");
@@ -684,7 +769,7 @@ namespace TerminalOrganizer.App
                 OverflowPolicy policy = OverflowPolicyParser.Parse(dto.overflowPolicy);
                 // @MX:NOTE: raw version 0/1/2 means preset on; decided before normalization (SPEC-RULES-009 REQ-SET-003).
                 bool legacy = dto.schemaVersion <= 2;
-                TitleRulesSettings rules = legacy ? TitleRulesSettings.Migrated() : TitleRulesSettings.FromBlock(dto.titleRules);
+                TitleRulesSettings rules = legacy ? TitleRulesSettings.Migrated(dto.titleRules) : TitleRulesSettings.FromBlock(dto.titleRules);
                 if (report)
                 {
                     rules.ReportDiagnostics(log);
@@ -765,7 +850,7 @@ namespace TerminalOrganizer.App
                 {
                     Directory.CreateDirectory(directory);
                 }
-                File.WriteAllText(path, new JavaScriptSerializer().Serialize(dto));
+                File.WriteAllText(path, NewSerializer().Serialize(dto));
             }
             catch (Exception ex)
             {

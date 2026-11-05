@@ -43,6 +43,11 @@ namespace TerminalOrganizer.Core.Rules
             {
                 foreach (CompiledRule rule in rules.Rules)
                 {
+                    // The public RuleSet constructor admits a null element; such a rule never matches.
+                    if (rule == null)
+                    {
+                        continue;
+                    }
                     string name;
                     int? rank;
                     if (Apply(rule, title, commandLine, fallbackName, state, diagnostics, out name, out rank))
@@ -129,6 +134,11 @@ namespace TerminalOrganizer.Core.Rules
                     }
                     break;
                 case RuleKind.Regex:
+                    // A hand-built Regex-kind rule may carry no compiled expression; it never matches.
+                    if (rule.Regex == null)
+                    {
+                        return false;
+                    }
                     // A rule tripped in this scope does not run its regular expression again; it still reports.
                     if (state != null && state.IsTripped(rule))
                     {

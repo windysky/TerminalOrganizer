@@ -576,3 +576,154 @@ Describe 'AC-011 detached spawn choreography source contract (REQ-UPD-007/009)' 
         ($checkerSrc -match '\.git') | Should Be $true
     }
 }
+
+Describe 'F1 the production process runner is hard-bounded (t16, SPEC-TRAY-020 sync-audit debt)' {
+    $script:RunnerPs51 = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $script:RunnerCmd = Join-Path $env:SystemRoot 'System32\cmd.exe'
+
+    # Drives the REAL runner on a separate runspace so a runner that blocks forever (the
+    # pre-fix ReadToEnd-before-WaitForExit shape) trips THIS guard instead of hanging the
+    # suite. Returns Completed=$false when the guard expired; the abandoned worker is
+    # released afterwards because the caller kills the fake child.
+    function Invoke-BoundedRunner([string]$FileName, [string]$Arguments, [int]$TimeoutMs, [int]$GuardMs) {
+        $ps = [PowerShell]::Create()
+        [void]$ps.AddScript({
+                param($f, $a, $t)
+                [TerminalOrganizer.App.UpdateChecker]::RunBoundedProcess($f, $a, $t)
+            }).AddArgument($FileName).AddArgument($Arguments).AddArgument($TimeoutMs)
+        $watch = [Diagnostics.Stopwatch]::StartNew()
+        $handle = $ps.BeginInvoke()
+        $done = $handle.AsyncWaitHandle.WaitOne($GuardMs)
+        $watch.Stop()
+        $result = $null
+        if ($done) {
+            $result = @($ps.EndInvoke($handle))[0]
+            $ps.Dispose()
+        }
+        return @{ Completed = $done; ElapsedMs = $watch.ElapsedMilliseconds; Result = $result }
+    }
+
+    function Stop-RunnerFake([string]$PidFile) {
+        if (Test-Path $PidFile) {
+            $raw = (Get-Content -LiteralPath $PidFile -ErrorAction SilentlyContinue | Select-Object -First 1)
+            $fakePid = 0
+            if ([int]::TryParse(([string]$raw).Trim(), [ref]$fakePid) -and $fakePid -gt 0) {
+                Stop-Process -Id $fakePid -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
+    It 'a never-exiting child returns TimedOut within the bound and the owned child is killed' {
+        $pidFile = Join-Path $here ('scratch-runner-pid-' + [Guid]::NewGuid().ToString('N') + '.txt')
+        try {
+            $args1 = '-NoProfile -Command "[IO.File]::WriteAllText(''' + $pidFile + ''', [string]$PID); Start-Sleep -Seconds 600"'
+            $run = Invoke-BoundedRunner $script:RunnerPs51 $args1 1500 15000
+            $run.Completed | Should Be $true
+            $run.Result.Started | Should Be $true
+            $run.Result.TimedOut | Should Be $true
+            ($run.ElapsedMs -lt 10000) | Should Be $true
+            (Test-Path $pidFile) | Should Be $true
+            $fakePid = [int]((Get-Content -LiteralPath $pidFile | Select-Object -First 1).Trim())
+            $alive = $true
+            for ($i = 0; $i -lt 20 -and $alive; $i++) {
+                $alive = $null -ne (Get-Process -Id $fakePid -ErrorAction SilentlyContinue)
+                if ($alive) { Start-Sleep -Milliseconds 100 }
+            }
+            $alive | Should Be $false
+        }
+        finally {
+            Stop-RunnerFake $pidFile
+            Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'a fast child returns Ok with its exit code, captured stdout and stderr first line' {
+        $run = Invoke-BoundedRunner $script:RunnerCmd '/c echo hello' 10000 20000
+        $run.Completed | Should Be $true
+        $run.Result.Started | Should Be $true
+        $run.Result.TimedOut | Should Be $false
+        $run.Result.ExitCode | Should Be 0
+        $run.Result.StdOut.Trim() | Should BeExactly 'hello'
+        $failing = Invoke-BoundedRunner $script:RunnerCmd '/c echo oops 1>&2 & exit 3' 10000 20000
+        $failing.Completed | Should Be $true
+        $failing.Result.ExitCode | Should Be 3
+        $failing.Result.FirstErrorLine | Should BeExactly 'oops'
+    }
+
+    It 'a child filling the stderr pipe before writing stdout does not deadlock the reads' {
+        $big = '-NoProfile -Command "[Console]::Error.Write(''e'' * 300000); [Console]::Out.Write(''ok'')"'
+        $run = Invoke-BoundedRunner $script:RunnerPs51 $big 20000 30000
+        $run.Completed | Should Be $true
+        $run.Result.TimedOut | Should Be $false
+        $run.Result.ExitCode | Should Be 0
+        $run.Result.StdOut | Should BeExactly 'ok'
+    }
+
+    It 'an unresolvable program maps to NotStarted, never a throw' {
+        $run = Invoke-BoundedRunner (Join-Path $env:SystemRoot 'System32\no-such-program-t16.exe') '' 2000 10000
+        $run.Completed | Should Be $true
+        $run.Result.Started | Should Be $false
+    }
+
+    It 'the runner source reads the pipes asynchronously before the bounded wait and kills the owned child on expiry (no unbounded reads, no stale never-terminated claim)' {
+        $checker = [IO.File]::ReadAllText((Join-Path $repoRoot 'src\TerminalOrganizer.App\UpdateChecker.cs'))
+        $start = $checker.IndexOf('public static UpdateGitResult RunBoundedProcess')
+        ($start -ge 0) | Should Be $true
+        $end = $checker.IndexOf('private static string FirstLine', $start)
+        $body = $checker.Substring($start, $end - $start)
+        $readIndex = $body.IndexOf('ReadToEndAsync')
+        $waitIndex = $body.IndexOf('WaitForExit(timeoutMs)')
+        ($readIndex -ge 0 -and $waitIndex -gt $readIndex) | Should Be $true
+        ($body -match '\.ReadToEnd\(\)') | Should Be $false
+        ($body -match 'KillOwnedProcess\(child\)') | Should Be $true
+        ($checker -match 'never forcibly terminated') | Should Be $false
+        # RunGitProcess stays the one production entry, delegating with git.exe.
+        ($checker -match 'RunBoundedProcess\("git\.exe", arguments, timeoutMs\)') | Should Be $true
+    }
+}
+
+Describe 'F2 update UI is gated on repo-checkout detection (t16, README/CHANGELOG claim: zip installs show no update rows)' {
+    $script:F2Ctx = [IO.File]::ReadAllText((Join-Path $repoRoot 'src\TerminalOrganizer.App\TrayContext.cs'))
+
+    It 'the menu state no longer passes the literal true: supportsUpdate is driven by the stored repo-detection flag' {
+        ($script:F2Ctx -match 'supportsUpdate:\s*true') | Should Be $false
+        ($script:F2Ctx -match 'supportsUpdate:\s*this\.updateSupported') | Should Be $true
+        # The only construction site of the menu state is the shared BuildMenuState factory.
+        ([regex]::Matches($script:F2Ctx, 'new TrayMenuState\(')).Count | Should Be 1
+    }
+
+    It 'the flag is derived once from DeriveRepoRoot() != null at construction, never re-derived per menu build' {
+        ([regex]::Matches($script:F2Ctx, 'private readonly bool updateSupported;')).Count | Should Be 1
+        ($script:F2Ctx -match 'this\.updateSupported = updateRepoRoot != null;') | Should Be $true
+        ($script:F2Ctx -match 'string updateRepoRoot = UpdateChecker\.DeriveRepoRoot\(\);') | Should Be $true
+        $factory = $script:F2Ctx.IndexOf('private TrayMenuState BuildMenuState')
+        $factoryEnd = $script:F2Ctx.IndexOf('/// <summary>Walks the live tree', $factory)
+        ($factory -ge 0 -and $factoryEnd -gt $factory) | Should Be $true
+        ($script:F2Ctx.Substring($factory, $factoryEnd - $factory) -match 'DeriveRepoRoot') | Should Be $false
+    }
+
+    It 'the startup auto-check arm returns silently (one log line, no timer) on a non-repo install, before any timer is created' {
+        $arm = $script:F2Ctx.IndexOf('private void ArmStartupUpdateCheck')
+        $span = $script:F2Ctx.Substring($arm, [Math]::Min(1500, $script:F2Ctx.Length - $arm))
+        $gate = $span.IndexOf('if (!this.updateSupported)')
+        $timer = $span.IndexOf('new System.Windows.Forms.Timer()')
+        ($gate -ge 0 -and $timer -gt $gate) | Should Be $true
+        ($span -match 'update: startup check skipped reason=not-a-repo-checkout') | Should Be $true
+        ($span.Substring($gate, $timer - $gate) -match 'return;') | Should Be $true
+        ($span.Substring($gate, $timer - $gate) -match 'ShowBalloon') | Should Be $false
+    }
+
+    It 'the menu builder renders no update rows when the state does not support updates (the gated-off shape)' {
+        $monitors = @()
+        $selector = [TerminalOrganizer.Core.Assignment.ManagerSelector]::None()
+        $resolution = New-Object TerminalOrganizer.Core.Assignment.ManagerResolution -ArgumentList `
+            ([TerminalOrganizer.Core.Assignment.ManagerResolutionStatus]::None), $null, ([IntPtr]::Zero), 0, $null
+        $state = New-Object TerminalOrganizer.App.TrayMenuState -ArgumentList $false, 'Ctrl+Alt+O', $monitors,
+            ([TerminalOrganizer.Core.Windows.WindowSnapshot[]]@()), $selector, $resolution, $null, $false,
+            ([TerminalOrganizer.App.OverflowPolicy]::Ask), $null, $true, 'mixed', 10, $false, $true, $false
+        $state.SupportsUpdate | Should Be $false
+        $kinds = ([TerminalOrganizer.App.TrayMenuBuilder]::Build($state) | ForEach-Object { $_.Kind.ToString() }) -join ','
+        ($kinds -match 'CheckForUpdates|UpdateAndRestart') | Should Be $false
+        ($kinds -match 'Settings,Version,Exit') | Should Be $true
+    }
+}

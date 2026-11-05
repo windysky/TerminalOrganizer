@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Threading.Tasks;
 using TerminalOrganizer.Core.Update;
 
 namespace TerminalOrganizer.App
@@ -134,6 +135,12 @@ namespace TerminalOrganizer.App
 
         /// <summary>The bounded wait for each git subprocess (section J).</summary>
         public const int FetchTimeoutMs = 20000;
+
+        /// <summary>The wait after killing a timed-out owned process (the UiaProbeClient PostKillWait idea).</summary>
+        private const int PostKillWaitMilliseconds = 200;
+
+        /// <summary>The bound on draining stdout / stderr after a normal exit (a grandchild may hold the pipe open).</summary>
+        private const int PostExitReadWaitMilliseconds = 1000;
 
         /// <summary>The one-shot startup check delay, after the shell is whole (D-6, section J).</summary>
         public const int StartupCheckDelayMs = 8000;
@@ -321,43 +328,108 @@ namespace TerminalOrganizer.App
         }
 
         /// <summary>
-        /// The production runner: one hidden git subprocess with a bounded wait (the
-        /// UiaProbe hard-timeout idiom — CreateNoWindow, UseShellExecute=false, a
-        /// millisecond wait; a timed-out process is never forcibly terminated). A start
+        /// The production runner: one hidden git subprocess with a bounded wait. A start
         /// failure (git unresolvable) maps to NotStarted — the surfaced GitMissing
         /// outcome, never a crash. Never called on the UI thread (REQ-UPD-006).
         /// </summary>
-        // @MX:WARN: [AUTO] real subprocess surface (git fetch / rev-list, read-only vocabulary); bounded wait; never on the UI thread.
-        // @MX:REASON: an unbounded or mutating git call here blocks the app or changes machine state.
         private static UpdateGitResult RunGitProcess(string arguments, int timeoutMs)
         {
+            return RunBoundedProcess("git.exe", arguments, timeoutMs);
+        }
+
+        /// <summary>
+        /// Runs one hidden child process under a hard bound: the stdout / stderr reads
+        /// start asynchronously BEFORE the wait, so a child that never exits (or never
+        /// closes its pipes) cannot block the wait itself. On expiry the OWNED process is
+        /// killed (a grandchild such as git-remote-https is not tracked and may outlive
+        /// it) and TimedOutResult comes back. After a normal exit the reads get one short
+        /// bounded wait: a grandchild that still holds the pipe open yields empty text
+        /// rather than a hang. A start failure maps to NotStarted. Public only as the
+        /// test seam of the production runner.
+        /// </summary>
+        // @MX:WARN: [AUTO] real subprocess surface (git fetch / rev-list, read-only vocabulary); bounded wait; never on the UI thread.
+        // @MX:REASON: an unbounded or mutating git call here blocks the app or changes machine state.
+        public static UpdateGitResult RunBoundedProcess(string fileName, string arguments, int timeoutMs)
+        {
+            Process child = null;
+            bool disposeChild = true;
             try
             {
-                ProcessStartInfo start = new ProcessStartInfo("git.exe", arguments);
+                ProcessStartInfo start = new ProcessStartInfo(fileName, arguments);
                 start.CreateNoWindow = true;
                 start.UseShellExecute = false;
                 start.RedirectStandardOutput = true;
                 start.RedirectStandardError = true;
-                using (Process git = Process.Start(start))
+                child = Process.Start(start);
+                if (child == null)
                 {
-                    if (git == null)
-                    {
-                        return UpdateGitResult.NotStarted();
-                    }
-                    string stdout = git.StandardOutput.ReadToEnd();
-                    string stderr = git.StandardError.ReadToEnd();
-                    if (!git.WaitForExit(timeoutMs))
-                    {
-                        return UpdateGitResult.TimedOutResult();
-                    }
-                    return UpdateGitResult.Ok(git.ExitCode, stdout, FirstLine(stderr));
+                    return UpdateGitResult.NotStarted();
                 }
+                Task<string> stdoutRead = child.StandardOutput.ReadToEndAsync();
+                Task<string> stderrRead = child.StandardError.ReadToEndAsync();
+                if (!child.WaitForExit(timeoutMs))
+                {
+                    KillOwnedProcess(child);
+                    disposeChild = stdoutRead.IsCompleted && stderrRead.IsCompleted;
+                    return UpdateGitResult.TimedOutResult();
+                }
+                string stdout = ReadBounded(stdoutRead);
+                string stderr = ReadBounded(stderrRead);
+                disposeChild = stdoutRead.IsCompleted && stderrRead.IsCompleted;
+                return UpdateGitResult.Ok(child.ExitCode, stdout, FirstLine(stderr));
             }
             catch (Exception)
             {
                 // The start itself failed (git unresolvable on this PATH): surfaced, never thrown.
                 return UpdateGitResult.NotStarted();
             }
+            finally
+            {
+                // A read still pending on a pipe a grandchild holds open keeps the Process
+                // undisposed (its finalizer reclaims it) rather than closing a live stream.
+                if (child != null && disposeChild)
+                {
+                    try
+                    {
+                        child.Dispose();
+                    }
+                    catch (Exception)
+                    {
+                        // Disposal is best effort.
+                    }
+                }
+            }
+        }
+
+        /// <summary>Kills only the OWNED process and waits briefly for its exit; never throws.</summary>
+        private static void KillOwnedProcess(Process child)
+        {
+            try
+            {
+                child.Kill();
+                child.WaitForExit(PostKillWaitMilliseconds);
+            }
+            catch (Exception)
+            {
+                // The process is dying (or already gone) either way; the result is TimedOut.
+            }
+        }
+
+        /// <summary>The finished read's text, or empty when it did not finish within the bound or faulted.</summary>
+        private static string ReadBounded(Task<string> read)
+        {
+            try
+            {
+                if (read.Wait(PostExitReadWaitMilliseconds))
+                {
+                    return read.Result ?? string.Empty;
+                }
+            }
+            catch (Exception)
+            {
+                // A faulted read degrades to empty text.
+            }
+            return string.Empty;
         }
 
         private static string FirstLine(string text)
