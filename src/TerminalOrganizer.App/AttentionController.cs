@@ -377,6 +377,8 @@ namespace TerminalOrganizer.App
                         + signals[i].Needle + "\"");
                     continue;
                 }
+                // Card ask-sound: only a signal that survived the disabled switch and the event policy plays.
+                PlayAskSound(signals[i]);
                 pending.Add(signals[i]);
             }
             if (!inFlight && pending.Count > 0)
@@ -824,11 +826,7 @@ namespace TerminalOrganizer.App
                 return "no tray notice";
             }
             long now = (zeroMatchClock == null ? UtcNowEpochMs() : zeroMatchClock());
-            string key = AttentionMatcher.Normalize(signal.Needle);
-            if (key.Length == 0)
-            {
-                key = signal.Needle ?? string.Empty;
-            }
+            string key = NeedleKey(signal.Needle);
             long last;
             if (zeroMatchNoticedAt.TryGetValue(key, out last)
                 && now - last < AttentionConstants.ZeroMatchNoticeCooldownMs)
@@ -844,26 +842,85 @@ namespace TerminalOrganizer.App
                 failure = ex.Message;
                 return "tray notice failed";
             }
-            RememberZeroMatchNotice(key, now);
+            RememberNoticeTime(zeroMatchNoticedAt, key, now, AttentionConstants.ZeroMatchNoticeCooldownMs);
             return "tray notice shown";
         }
 
-        private void RememberZeroMatchNotice(string key, long now)
+        /// <summary>The cooldown key of a needle: its matcher-normalized form, or the raw needle when that is empty (shared by the zero-match notice and the ask sound).</summary>
+        private static string NeedleKey(string needle)
         {
-            // Entries past the cooldown can never suppress anything again; drop them so the map stays small.
+            string key = AttentionMatcher.Normalize(needle);
+            return key.Length == 0 ? (needle ?? string.Empty) : key;
+        }
+
+        /// <summary>Records a notice time for a key; entries past the cooldown can never suppress anything again, so they are dropped to keep the map small.</summary>
+        private static void RememberNoticeTime(Dictionary<string, long> map, string key, long now, long cooldownMs)
+        {
             List<string> expired = new List<string>();
-            foreach (KeyValuePair<string, long> entry in zeroMatchNoticedAt)
+            foreach (KeyValuePair<string, long> entry in map)
             {
-                if (now - entry.Value >= AttentionConstants.ZeroMatchNoticeCooldownMs)
+                if (now - entry.Value >= cooldownMs)
                 {
                     expired.Add(entry.Key);
                 }
             }
             for (int i = 0; i < expired.Count; i++)
             {
-                zeroMatchNoticedAt.Remove(expired[i]);
+                map.Remove(expired[i]);
             }
-            zeroMatchNoticedAt[key] = now;
+            map[key] = now;
+        }
+
+        /// <summary>
+        /// Card ask-sound: installs the sound played when a consumed signal has kind "ask". The play seam is
+        /// invoked once per such signal (zero-match or not) unless the same needle, normalized as the matcher
+        /// does, already played less than AttentionConstants.AskSoundCooldownMs ago; the clock seam returns Unix
+        /// epoch milliseconds (null uses the production clock). A null play seam means no sound, which is the
+        /// state of every constructor until this is called. Production wiring: the Windows notification sound.
+        /// </summary>
+        public void SetAskSound(Action play, Func<long> nowMs)
+        {
+            askSoundPlay = play;
+            askSoundClock = nowMs;
+        }
+
+        // Card ask-sound: the play seam, its clock and the per-needle last-play time (UI thread only).
+        private Action askSoundPlay;
+        private Func<long> askSoundClock;
+        private readonly Dictionary<string, long> askSoundPlayedAt = new Dictionary<string, long>(StringComparer.Ordinal);
+
+        /// <summary>
+        /// Plays the ask sound for one consumed signal and logs the decision (played, suppressed by the
+        /// cooldown, or failed). Called only for signals the disabled switch and the event policy let through.
+        /// A seam that throws is contained and does not start the cooldown, so the next signal may try again.
+        /// Silent (no log line) when there is no seam or the signal is not of kind "ask". Never throws.
+        /// </summary>
+        private void PlayAskSound(AttentionSignal signal)
+        {
+            Action play = askSoundPlay;
+            if (play == null || !string.Equals(signal.Kind, KindAsk, StringComparison.Ordinal))
+            {
+                return;
+            }
+            long now = (askSoundClock == null ? UtcNowEpochMs() : askSoundClock());
+            string key = NeedleKey(signal.Needle);
+            long last;
+            if (askSoundPlayedAt.TryGetValue(key, out last) && now - last < AttentionConstants.AskSoundCooldownMs)
+            {
+                Log("attention: ask sound suppressed (cooldown) needle=\"" + signal.Needle + "\"");
+                return;
+            }
+            try
+            {
+                play();
+            }
+            catch (Exception ex)
+            {
+                Log("attention: ask sound failed: " + ex.Message);
+                return;
+            }
+            RememberNoticeTime(askSoundPlayedAt, key, now, AttentionConstants.AskSoundCooldownMs);
+            Log("attention: ask sound played needle=\"" + signal.Needle + "\"");
         }
 
         /// <summary>The notice body: no window was found for the session, then the signal's message when it has one (one line, bounded).</summary>

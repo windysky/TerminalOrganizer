@@ -129,6 +129,28 @@ namespace TerminalOrganizer.App
         }
     }
 
+    /// <summary>
+    /// Card ask-sound: the one winmm call behind the attention ask sound. PlaySound with SND_ALIAS and SND_ASYNC
+    /// plays the user's own "Notification.Default" sound-scheme entry in the background (silent when the scheme
+    /// sets it to none); SND_NODEFAULT keeps Windows from falling back to the default beep when the alias is missing.
+    /// </summary>
+    // @MX:WARN: [AUTO] real winmm P/Invoke (PlaySound) - morning checklist; never exercised by the suite.
+    internal static class SoundNative
+    {
+        internal const uint SND_ASYNC = 0x0001;
+        internal const uint SND_NODEFAULT = 0x0002;
+        internal const uint SND_ALIAS = 0x00010000;
+
+        [DllImport("winmm.dll", CharSet = CharSet.Unicode)]
+        internal static extern bool PlaySound(string sound, IntPtr module, uint flags);
+
+        /// <summary>Queues the notification sound; true when Windows accepted it.</summary>
+        internal static bool PlayNotification()
+        {
+            return PlaySound("Notification.Default", IntPtr.Zero, SND_ALIAS | SND_ASYNC | SND_NODEFAULT);
+        }
+    }
+
     // @MX:WARN: [AUTO] real hotkey P/Invoke (RegisterHotKey/UnregisterHotKey) — morning checklist; never exercised by the suite.
     internal static class HotkeyNative
     {
@@ -732,6 +754,9 @@ namespace TerminalOrganizer.App
             // toast and flash while the organizer heartbeat is fresh.
             this.attention.SetZeroMatchNotice(
                 delegate(string title, string text) { ShowAttentionBalloon(title, text); }, null);
+            // Card ask-sound: an alert that needs an answer (kind "ask") also plays the Windows notification
+            // sound, because the producer stays quiet while the organizer heartbeat is fresh.
+            this.attention.SetAskSound(delegate { PlayNotificationSound(); }, null);
             if (!current.AttentionOverlay)
             {
                 // D-2 default ON; an explicit false in the file starts the controller disabled.
@@ -792,6 +817,15 @@ namespace TerminalOrganizer.App
                     : level == NoticeLevel.Warning ? ToolTipIcon.Warning
                     : ToolTipIcon.Info;
                 this.icon.ShowBalloonTip(5000, "TerminalOrganizer", text, icon);
+            }
+        }
+
+        /// <summary>Card ask-sound: plays the user's Windows notification sound, asynchronously (the UI thread never waits). A failure throws to the attention controller, which contains and logs it.</summary>
+        private static void PlayNotificationSound()
+        {
+            if (!SoundNative.PlayNotification())
+            {
+                throw new InvalidOperationException("PlaySound did not queue the Notification.Default sound");
             }
         }
 

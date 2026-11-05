@@ -45,6 +45,10 @@ namespace TerminalOrganizer.Core.Attention
         /// once per needle (normalized as the matcher does) within this many milliseconds.</summary>
         public const long ZeroMatchNoticeCooldownMs = 60000;
 
+        /// <summary>Card ask-sound: an ask-kind signal plays the notification sound at most once per needle
+        /// (normalized as the matcher does) within this many milliseconds.</summary>
+        public const long AskSoundCooldownMs = 10000;
+
         // @MX:NOTE: SPEC-TRAY-016 message-constant block (plan.md section J): the pinned
         // panel geometry/typography set — changing any value here is a SPEC amendment,
         // never a tuning knob (the same doctrine as every constant above).
