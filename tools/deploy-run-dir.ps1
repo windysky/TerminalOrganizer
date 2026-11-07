@@ -17,7 +17,7 @@
 # the tray's Update and restart keeps the run dir fresh by itself.
 param(
     [string]$RunDir = (Join-Path $env:LOCALAPPDATA 'Programs\TerminalOrganizer'),
-    [string]$RepoPath = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)),
+    [string]$RepoPath = (Split-Path -Parent $PSScriptRoot),
     [switch]$NoShortcuts,
     [switch]$NoStart
 )
