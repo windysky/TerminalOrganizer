@@ -757,6 +757,17 @@ namespace TerminalOrganizer.App
             // Card ask-sound: an alert that needs an answer (kind "ask") also plays the Windows notification
             // sound, because the producer stays quiet while the organizer heartbeat is fresh.
             this.attention.SetAskSound(delegate { PlayNotificationSound(); }, null);
+            // v0.2.9: an update that failed while we were down (the detached helper
+            // restarts us after every failure) surfaces its reason once the UI loop is
+            // live — a modal prompt, not a 5-second balloon.
+            try
+            {
+                this.messageWindow.BeginInvoke((Action)delegate { CheckUpdateFailureMarker(); });
+            }
+            catch (Exception)
+            {
+                // Pre-loop construction edge: the marker simply waits for the next start.
+            }
             if (!current.AttentionOverlay)
             {
                 // D-2 default ON; an explicit false in the file starts the controller disabled.
@@ -2007,6 +2018,47 @@ namespace TerminalOrganizer.App
         }
 
         /// <summary>
+        /// v0.2.9: reads the update helper's failure marker (written when a pull failed
+        /// while the app was down) and, when present, prompts with the reason. Runs once
+        /// on the UI loop after construction.
+        /// </summary>
+        private void CheckUpdateFailureMarker()
+        {
+            string reason = UpdateFailureMarker.ReadAndClear(UpdateFailureMarker.DefaultPath());
+            if (reason != null)
+            {
+                ShowUpdateFailurePrompt(reason);
+            }
+        }
+
+        /// <summary>
+        /// v0.2.9: update failures surface their REASON in a dialog that stays until
+        /// dismissed — a tray balloon vanished after seconds and never said why. The
+        /// dialog offers to open the log (the full git output lives there).
+        /// </summary>
+        private void ShowUpdateFailurePrompt(string reason)
+        {
+            log.Append("update: failed: " + reason);
+            bool openLog = false;
+            try
+            {
+                openLog = MessageBox.Show(
+                    "Update failed:\n\n" + reason
+                    + "\n\nThe full detail is in the log.\n\nOpen the log now?",
+                    "TerminalOrganizer update failed",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes;
+            }
+            catch (Exception ex)
+            {
+                log.Append("update: failure prompt failed: " + ex.Message);
+            }
+            if (openLog)
+            {
+                OpenLogFile();
+            }
+        }
+
+        /// <summary>
         /// SPEC-TRAY-020 D-1 (REQ-UPD-009): spawns the detached repo-local helper through
         /// the %SystemRoot%-rooted absolute powershell.exe with -NoProfile
         /// -ExecutionPolicy Bypass -File, the four pinned parameters (repo root, exe
@@ -2023,7 +2075,7 @@ namespace TerminalOrganizer.App
                 if (repoRoot == null)
                 {
                     log.Append("update: helper not spawned: not a repo checkout");
-                    ShowBalloon("Update check failed (not a repo checkout). See the log for detail.", NoticeLevel.Error);
+                    ShowUpdateFailurePrompt("not a repo checkout — the updater needs a git clone");
                     return false;
                 }
                 string script = Path.Combine(repoRoot, "tools", "update-helper.ps1");
@@ -2047,7 +2099,7 @@ namespace TerminalOrganizer.App
             catch (Exception ex)
             {
                 log.Append("update: helper spawn failed: " + ex.Message);
-                ShowBalloon("Update check failed (helper did not start). See the log for detail.", NoticeLevel.Error);
+                ShowUpdateFailurePrompt("the helper did not start: " + ex.Message);
                 return false;
             }
         }

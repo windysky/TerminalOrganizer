@@ -32,14 +32,16 @@ function New-UpdateFixture {
     git -C $clone push origin main 2>&1 | Out-Null
     git clone $origin $pusher 2>&1 | Out-Null
 
-    # The restart stand-in exe: a cmd that appends one line to the marker file, so a
-    # helper restart is measurable evidence (Start-Process on a .cmd runs it).
+    # The restart stand-in exe: a vbs that appends one line to the marker file, so a
+    # helper restart is measurable evidence (Start-Process on a .vbs runs it through
+    # wscript — CONSOLE-FREE, unlike the earlier .cmd stand-in whose console flashed
+    # on the user's desktop on every helper run).
     $markerFile = Join-Path $scratch 'restart-marker.txt'
-    $markerCmd = Join-Path $scratch 'restart-marker.cmd'
-    [IO.File]::WriteAllText($markerCmd, "@echo restarted>>`"$markerFile`"`r`n")
+    $markerVbs = Join-Path $scratch 'restart-marker.vbs'
+    [IO.File]::WriteAllText($markerVbs, "Set fso = CreateObject(""Scripting.FileSystemObject"")`r`nSet f = fso.OpenTextFile(""${markerFile}"", 8, True)`r`nf.WriteLine ""restarted""`r`nf.Close`r`n")
 
     return @{ Scratch = $scratch; Origin = $origin; Clone = $clone; Pusher = $pusher
-        Exe = $markerCmd; MarkerFile = $markerFile; Log = (Join-Path $scratch 'app.log') }
+        Exe = $markerVbs; MarkerFile = $markerFile; Log = (Join-Path $scratch 'app.log') }
 }
 
 # Advances the fixture origin by one commit touching the tracked stand-in exe and,
@@ -73,7 +75,7 @@ function Invoke-UpdateHelper($Fixture, [int]$AppPid,
 # on the stand-in exe while the helper runs (hold/release choreography).
 function Start-UpdateHelper($Fixture, [int]$AppPid,
     [int]$PidWaitSeconds = 60, [int]$LockWaitSeconds = 30, [int]$LockPollMs = 250) {
-    return Start-Process -FilePath $script:HelperPs51 -ArgumentList '-NoProfile', `
+    return Start-Process -FilePath $script:HelperPs51 -WindowStyle Hidden -ArgumentList '-NoProfile', `
         '-ExecutionPolicy', 'Bypass', '-File', $script:HelperScript, `
         '-RepoPath', $Fixture.Clone, '-ExePath', $Fixture.Exe, '-AppPid', $AppPid, '-LogPath', $Fixture.Log, `
         '-PidWaitSeconds', $PidWaitSeconds, '-LockWaitSeconds', $LockWaitSeconds, '-LockPollMs', $LockPollMs -PassThru
@@ -120,7 +122,7 @@ function Remove-UpdateFixture([string]$Path, [int]$Seconds = 10) {
 
 # A process that is ALREADY gone when the helper starts (the fast PID path).
 function New-UpdateDeadPid {
-    $p = Start-Process -FilePath $script:HelperPs51 -ArgumentList '-NoProfile', '-Command', 'exit 0' -PassThru
+    $p = Start-Process -FilePath $script:HelperPs51 -WindowStyle Hidden -ArgumentList '-NoProfile', '-Command', 'exit 0' -PassThru
     $p.WaitForExit()
     return $p.Id
 }
@@ -170,6 +172,42 @@ Describe 'AC-006 helper happy path on a local fixture repo (REQ-UPD-009/011)' {
         }
         finally {
             if ($null -ne $lockStream) { $lockStream.Close() }
+            Remove-UpdateFixture $f.Scratch
+        }
+    }
+}
+
+Describe 'AC-007b failure marker: the reason reaches the next app run (v0.2.9)' {
+    It 'a failed pull writes the marker file with the single-line git reason' {
+        $f = New-UpdateFixture
+        $marker = Join-Path $f.Scratch 'update-failed.txt'
+        $env:TERMINALORGANIZER_UPDATE_FAILED_MARKER = $marker
+        try {
+            Push-UpdateFixtureCommit $f 'bin\new-stuff.txt'
+            [IO.File]::WriteAllText((Join-Path $f.Clone 'bin\new-stuff.txt'), 'orphaned local content')
+            $null = Invoke-UpdateHelper $f (New-UpdateDeadPid) 30 10 250
+            (Test-Path $marker) | Should Be $true
+            ([IO.File]::ReadAllText($marker)) | Should Match 'untracked working tree files would be overwritten'
+            @([IO.File]::ReadAllLines($marker)).Count | Should Be 1
+        }
+        finally {
+            Remove-Item Env:TERMINALORGANIZER_UPDATE_FAILED_MARKER -ErrorAction SilentlyContinue
+            Remove-UpdateFixture $f.Scratch
+        }
+    }
+
+    It 'a successful pull clears a stale marker from an earlier failure' {
+        $f = New-UpdateFixture
+        $marker = Join-Path $f.Scratch 'update-failed.txt'
+        [IO.File]::WriteAllText($marker, 'stale reason')
+        $env:TERMINALORGANIZER_UPDATE_FAILED_MARKER = $marker
+        try {
+            Push-UpdateFixtureCommit $f
+            $null = Invoke-UpdateHelper $f (New-UpdateDeadPid) 30 10 250
+            (Test-Path $marker) | Should Be $false
+        }
+        finally {
+            Remove-Item Env:TERMINALORGANIZER_UPDATE_FAILED_MARKER -ErrorAction SilentlyContinue
             Remove-UpdateFixture $f.Scratch
         }
     }
@@ -261,7 +299,7 @@ Describe 'AC-008 helper lock-wait bounds and PID handling (REQ-UPD-009)' {
         try {
             Push-UpdateFixtureCommit $f
             $after = (git -C $f.Pusher rev-parse HEAD).Trim()
-            $dummy = Start-Process -FilePath $script:HelperPs51 -ArgumentList '-NoProfile', '-Command', 'Start-Sleep -Seconds 4' -PassThru
+            $dummy = Start-Process -FilePath $script:HelperPs51 -WindowStyle Hidden -ArgumentList '-NoProfile', '-Command', 'Start-Sleep -Seconds 4' -PassThru
             $startedAt = [DateTime]::Now
 
             $rc = Invoke-UpdateHelper $f $dummy.Id 30 10 250
@@ -299,7 +337,7 @@ Describe 'AC-008 helper lock-wait bounds and PID handling (REQ-UPD-009)' {
         try {
             Push-UpdateFixtureCommit $f
             $before = Get-UpdateHead $f
-            $dummy = Start-Process -FilePath $script:HelperPs51 -ArgumentList '-NoProfile', '-Command', 'Start-Sleep -Seconds 30' -PassThru
+            $dummy = Start-Process -FilePath $script:HelperPs51 -WindowStyle Hidden -ArgumentList '-NoProfile', '-Command', 'Start-Sleep -Seconds 30' -PassThru
 
             $rc = Invoke-UpdateHelper $f $dummy.Id 1 10 250
 

@@ -727,3 +727,49 @@ Describe 'F2 update UI is gated on repo-checkout detection (t16, README/CHANGELO
         ($kinds -match 'Settings,Version,Exit') | Should Be $true
     }
 }
+
+Describe 'v0.2.9 update-failure prompt: the reason surfaces in a dialog that stays (marker + wiring)' {
+    It 'the marker static reads one trimmed reason and clears the file' {
+        $scratch = Join-Path $here ('scratch-updfail-' + [Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $scratch | Out-Null
+        $marker = Join-Path $scratch 'update-failed.txt'
+        [IO.File]::WriteAllText($marker, "error: the pull was refused`r`n")
+        try {
+            $reason = [TerminalOrganizer.App.UpdateFailureMarker]::ReadAndClear($marker)
+            $reason | Should BeExactly 'error: the pull was refused'
+            (Test-Path $marker) | Should Be $false
+        }
+        finally { Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue }
+    }
+
+    It 'a missing or empty marker reads null and creates nothing' {
+        $scratch = Join-Path $here ('scratch-updfail-' + [Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $scratch | Out-Null
+        $missing = Join-Path $scratch 'nope.txt'
+        $blank = Join-Path $scratch 'blank.txt'
+        [IO.File]::WriteAllText($blank, "   `r`n")
+        try {
+            ([TerminalOrganizer.App.UpdateFailureMarker]::ReadAndClear($missing)) | Should Be $null
+            ([TerminalOrganizer.App.UpdateFailureMarker]::ReadAndClear($blank)) | Should Be $null
+            (Test-Path $missing) | Should Be $false
+        }
+        finally { Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue }
+    }
+
+    It 'the default marker path lives under %LOCALAPPDATA%\TerminalOrganizer\update-failed.txt' {
+        $expected = Join-Path $env:LOCALAPPDATA 'TerminalOrganizer\update-failed.txt'
+        [TerminalOrganizer.App.UpdateFailureMarker]::DefaultPath() | Should BeExactly $expected
+    }
+
+    It 'source: the shell reads the marker on the UI loop and every update failure prompts (no vanishing balloon)' {
+        $ctx = [IO.File]::ReadAllText((Join-Path $repoRoot 'src\TerminalOrganizer.App\TrayContext.cs'))
+        ($ctx -match 'UpdateFailureMarker\.ReadAndClear') | Should Be $true
+        ($ctx -match 'CheckUpdateFailureMarker\(\)') | Should Be $true
+        # The prompt is a modal MessageBox that offers to open the log, and the old
+        # 5-second "See the log for detail" balloons are gone from the failure paths.
+        ($ctx -match 'Open the log now\?') | Should Be $true
+        ($ctx -match 'See the log for detail\.') | Should Be $false
+        $helper = [IO.File]::ReadAllText((Join-Path $repoRoot 'tools\update-helper.ps1'))
+        ($helper -match 'TERMINALORGANIZER_UPDATE_FAILED_MARKER') | Should Be $true
+    }
+}

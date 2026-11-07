@@ -450,6 +450,51 @@ namespace TerminalOrganizer.App
     /// text. The log line is Check()'s own (exactly one per path); these texts ride only
     /// the balloon surface.
     /// </summary>
+    /// <summary>
+    /// v0.2.9: the update helper's failure marker. The detached helper cannot surface a
+    /// dialog (the app is exiting), so a failed pull writes its one-line reason to
+    /// %LOCALAPPDATA%\TerminalOrganizer\update-failed.txt (or the
+    /// TERMINALORGANIZER_UPDATE_FAILED_MARKER override) and restarts the app; the next
+    /// app run reads and clears the marker and prompts with the reason. A successful
+    /// pull clears any stale marker. Pure file IO; never throws.
+    /// </summary>
+    public static class UpdateFailureMarker
+    {
+        /// <summary>The production marker path under %LOCALAPPDATA%.</summary>
+        public static string DefaultPath()
+        {
+            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "TerminalOrganizer", "update-failed.txt");
+        }
+
+        /// <summary>Reads and clears the marker (best-effort delete); null when absent,
+        /// unreadable, or whitespace-only.</summary>
+        public static string ReadAndClear(string path)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(path) || !File.Exists(path))
+                {
+                    return null;
+                }
+                string reason = File.ReadAllText(path).Trim();
+                try
+                {
+                    File.Delete(path);
+                }
+                catch (Exception)
+                {
+                    // A locked marker is re-read next start; harmless.
+                }
+                return reason.Length == 0 ? null : reason;
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+    }
+
     public static class UpdateNotices
     {
         /// <summary>The Synced/Ahead/Diverged update-and-restart not-spawned texts also come from here.</summary>

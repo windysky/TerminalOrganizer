@@ -62,6 +62,39 @@ function Get-HelperGitExe {
     return $null
 }
 
+# v0.2.9: the failure marker the restarted app reads. An empty reason CLEARS the
+# marker (a successful pull wipes any stale failure); a non-empty reason writes the
+# one sanitized line (the callers pass the same single-line reason they log). The
+# path is %LOCALAPPDATA%\TerminalOrganizer\update-failed.txt, overridable with
+# TERMINALORGANIZER_UPDATE_FAILED_MARKER (the test seam). Never throws: a marker
+# write failure must not take the helper down.
+function Set-HelperFailureMarker([string]$Reason) {
+    try {
+        $path = if ($env:TERMINALORGANIZER_UPDATE_FAILED_MARKER) {
+            $env:TERMINALORGANIZER_UPDATE_FAILED_MARKER
+        } else {
+            Join-Path $env:LOCALAPPDATA 'TerminalOrganizer\update-failed.txt'
+        }
+        if (-not $path) { return }
+        if ([string]::IsNullOrEmpty($Reason)) {
+            if (Test-Path -LiteralPath $path) { Remove-Item -Force -LiteralPath $path }
+            return
+        }
+        $builder = New-Object System.Text.StringBuilder
+        foreach ($c in $Reason.ToCharArray()) {
+            $code = [int]$c
+            if ($code -eq 13) { [void]$builder.Append('\r') }
+            elseif ($code -eq 10) { [void]$builder.Append('\n') }
+            elseif (($code -lt 32 -and $code -ne 9) -or $code -eq 127) { [void]$builder.Append([char]0xFFFD) }
+            else { [void]$builder.Append($c) }
+        }
+        $dir = Split-Path -Parent $path
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+        [IO.File]::WriteAllText($path, $builder.ToString())
+    }
+    catch { }
+}
+
 function Wait-HelperPidExit([int]$TargetPid, [int]$Seconds) {
     # True when the process is gone (an already-exited PID is the fast no-op path);
     # false when the bound expires. Never throws on a missing PID.
@@ -114,6 +147,7 @@ try {
     }
     else {
         Add-HelperLog ('update: helper app-exit wait timeout after ' + $PidWaitSeconds + 's')
+        Set-HelperFailureMarker ('the previous app was still running after ' + $PidWaitSeconds + 's, so no update was attempted')
         $skipPull = $true
     }
 
@@ -124,6 +158,7 @@ try {
         }
         else {
             Add-HelperLog ('update: helper lock wait timeout after ' + $LockWaitSeconds + 's')
+            Set-HelperFailureMarker ('the app file stayed locked for ' + $LockWaitSeconds + 's, so no update was attempted')
             $skipPull = $true
         }
     }
@@ -135,6 +170,7 @@ try {
         $gitExe = Get-HelperGitExe
         if ($null -eq $gitExe) {
             Add-HelperLog 'update: helper pull failed: git.exe not resolvable'
+            Set-HelperFailureMarker 'git.exe was not found, so no update was attempted'
         }
         else {
             $output = & $gitExe -C $RepoPath pull --ff-only origin main 2>&1
@@ -147,6 +183,8 @@ try {
                 else {
                     Add-HelperLog 'update: helper pull ok'
                 }
+                # v0.2.9: a successful pull wipes any stale failure marker.
+                Set-HelperFailureMarker ''
             }
             else {
                 # git's fetch progress ("From ...", "* branch main -> FETCH_HEAD") also
@@ -159,12 +197,15 @@ try {
                 $firstErr = @($errLines | Where-Object { $_ -match '^(error|fatal):' })
                 if ($firstErr.Count -gt 0) {
                     Add-HelperLog ('update: helper pull failed: ' + $firstErr[0])
+                    Set-HelperFailureMarker ([string]$firstErr[0])
                 }
                 elseif ($errLines.Count -gt 0) {
                     Add-HelperLog ('update: helper pull failed: ' + $errLines[0])
+                    Set-HelperFailureMarker ([string]$errLines[0])
                 }
                 else {
                     Add-HelperLog ('update: helper pull failed: exit ' + $LASTEXITCODE)
+                    Set-HelperFailureMarker ('git pull exited with code ' + $LASTEXITCODE)
                 }
             }
         }
@@ -172,6 +213,7 @@ try {
 }
 catch {
     Add-HelperLog ('update: helper pull failed: ' + $_.Exception.Message)
+    Set-HelperFailureMarker $_.Exception.Message
 }
 
 # Step 4 (D-4): restart regardless of the pull outcome. The restarted app's own
