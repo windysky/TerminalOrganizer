@@ -773,3 +773,53 @@ Describe 'v0.2.9 update-failure prompt: the reason surfaces in a dialog that sta
         ($helper -match 'TERMINALORGANIZER_UPDATE_FAILED_MARKER') | Should Be $true
     }
 }
+
+Describe 'v0.2.10 run-dir layout: repo marker, progress window, deploy wiring' {
+    It 'DeriveRepoRoot falls back to repo-path.txt next to a deployed exe' {
+        $scratch = Join-Path $here ('scratch-rundir-' + [Guid]::NewGuid().ToString('N'))
+        $run = Join-Path $scratch 'run'
+        $repo = Join-Path $scratch 'repo'
+        New-Item -ItemType Directory -Path (Join-Path $run 'bin'), (Join-Path $repo 'src'), (Join-Path $repo '.git') -Force | Out-Null
+        $exeDir = Join-Path $run 'bin'
+        try {
+            [IO.File]::WriteAllText((Join-Path $exeDir 'repo-path.txt'), $repo)
+            [TerminalOrganizer.App.UpdateChecker]::DeriveRepoRoot($exeDir) | Should BeExactly $repo
+        }
+        finally { Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue }
+    }
+
+    It 'no marker, or a marker without a repo, stays null (the zip mode)' {
+        $scratch = Join-Path $here ('scratch-rundir-' + [Guid]::NewGuid().ToString('N'))
+        $run = Join-Path $scratch 'run\bin'
+        $notARepo = Join-Path $scratch 'plain'
+        New-Item -ItemType Directory -Path $run, $notARepo | Out-Null
+        try {
+            [TerminalOrganizer.App.UpdateChecker]::DeriveRepoRoot($run) | Should Be $null
+            [IO.File]::WriteAllText((Join-Path $run 'repo-path.txt'), $notARepo)
+            [TerminalOrganizer.App.UpdateChecker]::DeriveRepoRoot($run) | Should Be $null
+        }
+        finally { Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue }
+    }
+
+    It 'an unreadable or whitespace marker degrades to null, never throws' {
+        $scratch = Join-Path $here ('scratch-rundir-' + [Guid]::NewGuid().ToString('N'))
+        $run = Join-Path $scratch 'run\bin'
+        New-Item -ItemType Directory -Path $run | Out-Null
+        try {
+            [IO.File]::WriteAllText((Join-Path $run 'repo-path.txt'), "   `r`n")
+            { [TerminalOrganizer.App.UpdateChecker]::DeriveRepoRoot($run) } | Should Not Throw
+            [TerminalOrganizer.App.UpdateChecker]::DeriveRepoRoot($run) | Should Be $null
+        }
+        finally { Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue }
+    }
+
+    It 'source: the app spawns the helper with -ShowProgress; the helper gates its window and its deploy on the run-dir marker; the deploy tool exists' {
+        $ctx = [IO.File]::ReadAllText((Join-Path $repoRoot 'src\TerminalOrganizer.App\TrayContext.cs'))
+        ($ctx -match '-ShowProgress') | Should Be $true
+        $helper = [IO.File]::ReadAllText((Join-Path $repoRoot 'tools\update-helper.ps1'))
+        ($helper -match '\[switch\]\$ShowProgress') | Should Be $true
+        ($helper -match 'repo-path\.txt') | Should Be $true
+        ($helper -match 'deploy skipped missing') | Should Be $true
+        (Test-Path (Join-Path $repoRoot 'tools\deploy-run-dir.ps1')) | Should Be $true
+    }
+}

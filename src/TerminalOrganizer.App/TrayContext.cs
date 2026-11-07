@@ -2085,7 +2085,9 @@ namespace TerminalOrganizer.App
                     + " -RepoPath \"" + repoRoot + "\""
                     + " -ExePath \"" + exe + "\""
                     + " -AppPid " + appPid
-                    + " -LogPath \"" + this.logPath + "\"";
+                    + " -LogPath \"" + this.logPath + "\""
+                    // v0.2.10: show the helper's progress window (the suite omits it).
+                    + " -ShowProgress";
                 ProcessStartInfo start = new ProcessStartInfo(
                     Environment.ExpandEnvironmentVariables(UpdateChecker.HelperPowerShellExe), arguments);
                 start.CreateNoWindow = true;

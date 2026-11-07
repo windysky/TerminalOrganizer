@@ -21,8 +21,52 @@ param(
     [Parameter(Mandatory = $true)][string]$LogPath,
     [int]$PidWaitSeconds = 60,
     [int]$LockWaitSeconds = 30,
-    [int]$LockPollMs = 250
+    [int]$LockPollMs = 250,
+    # v0.2.10: show a small always-on-top progress window while the helper works
+    # (the app exits right after spawning us, so without it the whole update is
+    # invisible). Off by default so the suite stays headless; production passes it.
+    [switch]$ShowProgress
 )
+
+# --- v0.2.10 progress window (only under -ShowProgress; never under the suite) ---
+$script:ProgressForm = $null
+$script:ProgressLabel = $null
+function Show-ProgressWindow() {
+    if (-not $ShowProgress) { return }
+    try {
+        Add-Type -AssemblyName System.Windows.Forms | Out-Null
+        $script:ProgressForm = New-Object System.Windows.Forms.Form
+        $script:ProgressForm.Text = 'TerminalOrganizer update'
+        $script:ProgressForm.FormBorderStyle = 'FixedSingle'
+        $script:ProgressForm.MaximizeBox = $false
+        $script:ProgressForm.TopMost = $true
+        $script:ProgressForm.StartPosition = 'CenterScreen'
+        $script:ProgressForm.ShowInTaskbar = $true
+        $script:ProgressForm.Size = New-Object System.Drawing.Size(440, 120)
+        $script:ProgressLabel = New-Object System.Windows.Forms.Label
+        $script:ProgressLabel.Left = 12
+        $script:ProgressLabel.Top = 12
+        $script:ProgressLabel.Width = 404
+        $script:ProgressLabel.Height = 88
+        $script:ProgressForm.Controls.Add($script:ProgressLabel)
+        $script:ProgressForm.Show()
+        Update-HelperProgress 'Starting update…'
+    }
+    catch { $script:ProgressForm = $null }
+}
+function Update-HelperProgress([string]$Text) {
+    if ($null -eq $script:ProgressForm) { return }
+    try {
+        $script:ProgressLabel.Text = $Text
+        [System.Windows.Forms.Application]::DoEvents()
+    }
+    catch { }
+}
+function Close-ProgressWindow() {
+    if ($null -eq $script:ProgressForm) { return }
+    try { $script:ProgressForm.Close() } catch { }
+    $script:ProgressForm = $null
+}
 
 function Add-HelperLog([string]$Line) {
     # LogSink line format (LogSink.cs): 'yyyy-MM-dd HH:mm:ss' + one space + the line.
@@ -80,6 +124,9 @@ function Set-HelperFailureMarker([string]$Reason) {
             if (Test-Path -LiteralPath $path) { Remove-Item -Force -LiteralPath $path }
             return
         }
+        # The progress window carries the reason too (v0.2.10): one hook covers every
+        # failure site, since every failure writes this marker.
+        Update-HelperProgress ('Update failed: ' + $Reason)
         $builder = New-Object System.Text.StringBuilder
         foreach ($c in $Reason.ToCharArray()) {
             $code = [int]$c
@@ -129,6 +176,7 @@ function Wait-HelperLock([string]$Target, [int]$Seconds, [int]$PollMs) {
 
 function Start-HelperRestart {
     Add-HelperLog 'update: helper restarting'
+    Update-HelperProgress 'Restarting TerminalOrganizer…'
     try {
         $exeDir = Split-Path -Parent $ExePath
         Start-Process -FilePath $ExePath -WorkingDirectory $exeDir
@@ -136,12 +184,14 @@ function Start-HelperRestart {
     catch { }
 }
 
+Show-ProgressWindow
 $skipPull = $false
 
 try {
     # Step 1 (REQ-UPD-009): wait for the app process to exit, bounded. On timeout the
     # pull is skipped and the restart is still attempted — through the app's single-
     # instance gate that attempt is a silent no-op while the original app still lives.
+    Update-HelperProgress 'Waiting for the app to exit…'
     if (Wait-HelperPidExit $AppPid $PidWaitSeconds) {
         Add-HelperLog 'update: helper app-exit wait done'
     }
@@ -153,6 +203,7 @@ try {
 
     # Step 2: wait for the exe lock to release, bounded. Same skip-and-restart rule.
     if (-not $skipPull) {
+        Update-HelperProgress 'Waiting for the app file to unlock…'
         if (Wait-HelperLock $ExePath $LockWaitSeconds $LockPollMs) {
             Add-HelperLog 'update: helper lock released'
         }
@@ -185,6 +236,32 @@ try {
                 }
                 # v0.2.9: a successful pull wipes any stale failure marker.
                 Set-HelperFailureMarker ''
+                # v0.2.10: the deployed-run layout — when the exe lives OUTSIDE the repo
+                # (a run dir carrying repo-path.txt, made by tools\deploy-run-dir.ps1),
+                # refresh the run dir from the repo's bin after a successful pull. The
+                # run-dir exe is unlocked (its process exited in step 1); a missing
+                # payload name in the repo is skipped with a log line, never a failure.
+                # Without the marker nothing is copied (the legacy in-repo layout).
+                $runDir = Split-Path -Parent $ExePath
+                if (Test-Path -LiteralPath (Join-Path $runDir 'repo-path.txt')) {
+                    Update-HelperProgress 'Deploying…'
+                    try {
+                        foreach ($one in @('TerminalOrganizer.App.exe', 'TerminalOrganizer.Core.dll', 'TerminalOrganizer.UiaProbe.exe')) {
+                            $src = Join-Path (Join-Path $RepoPath 'bin') $one
+                            if (Test-Path -LiteralPath $src) {
+                                Copy-Item -LiteralPath $src -Destination (Join-Path $runDir $one) -Force
+                            }
+                            else {
+                                Add-HelperLog ('update: helper deploy skipped missing bin/' + $one)
+                            }
+                        }
+                        try { [IO.File]::WriteAllText((Join-Path $runDir 'repo-path.txt'), $RepoPath) } catch { }
+                    }
+                    catch {
+                        Add-HelperLog ('update: helper deploy failed: ' + $_.Exception.Message)
+                        Set-HelperFailureMarker ('deploying the update failed: ' + $_.Exception.Message)
+                    }
+                }
             }
             else {
                 # git's fetch progress ("From ...", "* branch main -> FETCH_HEAD") also

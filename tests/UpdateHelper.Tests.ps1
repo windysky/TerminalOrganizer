@@ -467,3 +467,63 @@ Describe 'scratch hygiene: this suite leaves no fixture folders behind' {
         Remove-Item -Force $script:MarkerRedirect -ErrorAction SilentlyContinue
     }
 }
+
+Describe 'AC-012 v0.2.10 deployed-run copy: a marker-carrying run dir is refreshed after the pull' {
+    It 'a run dir with repo-path.txt receives the pulled payload files and the restart fires from there' {
+        $f = New-UpdateFixture
+        $run = Join-Path $f.Scratch 'run'
+        New-Item -ItemType Directory -Path $run | Out-Null
+        # The deployed "exe" (restart evidence) lives IN the run dir this time.
+        $runExe = Join-Path $run 'standin-app.vbs'
+        [IO.File]::WriteAllText($runExe, [IO.File]::ReadAllText($f.Exe))
+        [IO.File]::WriteAllText((Join-Path $run 'repo-path.txt'), $f.Clone)
+        [IO.File]::WriteAllText((Join-Path $run 'TerminalOrganizer.Core.dll'), 'old payload')
+        try {
+            # Origin advances: the tracked stand-in exe AND one real deploy payload name.
+            [IO.File]::WriteAllText((Join-Path $f.Pusher 'bin\app.exe'), 'stand-in binary B')
+            [IO.File]::WriteAllText((Join-Path $f.Pusher 'bin\TerminalOrganizer.Core.dll'), 'new payload')
+            git -C $f.Pusher add bin 2>&1 | Out-Null
+            git -C $f.Pusher -c user.email=t@t -c user.name=t commit -m DEPLOY 2>&1 | Out-Null
+            git -C $f.Pusher push origin main 2>&1 | Out-Null
+            $deadPid = New-UpdateDeadPid
+
+            & $script:HelperPs51 -NoProfile -ExecutionPolicy Bypass -File $script:HelperScript `
+                -RepoPath $f.Clone -ExePath $runExe -AppPid $deadPid -LogPath $f.Log -PidWaitSeconds 30 -LockWaitSeconds 10 -LockPollMs 250
+            $rc = $LASTEXITCODE
+
+            $rc | Should Be 0
+            ([IO.File]::ReadAllText((Join-Path $run 'TerminalOrganizer.Core.dll'))) | Should BeExactly 'new payload'
+            ([IO.File]::ReadAllText((Join-Path $run 'repo-path.txt'))) | Should BeExactly $f.Clone
+            (Wait-UpdateMarker $f) | Should Be $true
+            $lines = @(Get-UpdateLogLines $f)
+            ($lines | Where-Object { $_ -match 'deploy skipped missing' }).Count | Should Be 2
+        }
+        finally { Remove-UpdateFixture $f.Scratch }
+    }
+
+    It 'a run dir WITHOUT the marker is left alone (the legacy layout pulls only)' {
+        $f = New-UpdateFixture
+        $run = Join-Path $f.Scratch 'run2'
+        New-Item -ItemType Directory -Path $run | Out-Null
+        $runExe = Join-Path $run 'standin-app.vbs'
+        [IO.File]::WriteAllText($runExe, [IO.File]::ReadAllText($f.Exe))
+        [IO.File]::WriteAllText((Join-Path $run 'TerminalOrganizer.Core.dll'), 'old payload')
+        try {
+            [IO.File]::WriteAllText((Join-Path $f.Pusher 'bin\app.exe'), 'stand-in binary B')
+            [IO.File]::WriteAllText((Join-Path $f.Pusher 'bin\TerminalOrganizer.Core.dll'), 'new payload')
+            git -C $f.Pusher add bin 2>&1 | Out-Null
+            git -C $f.Pusher -c user.email=t@t -c user.name=t commit -m DEPLOY2 2>&1 | Out-Null
+            git -C $f.Pusher push origin main 2>&1 | Out-Null
+            $deadPid = New-UpdateDeadPid
+
+            & $script:HelperPs51 -NoProfile -ExecutionPolicy Bypass -File $script:HelperScript `
+                -RepoPath $f.Clone -ExePath $runExe -AppPid $deadPid -LogPath $f.Log -PidWaitSeconds 30 -LockWaitSeconds 10 -LockPollMs 250
+            $rc = $LASTEXITCODE
+
+            $rc | Should Be 0
+            ([IO.File]::ReadAllText((Join-Path $run 'TerminalOrganizer.Core.dll'))) | Should BeExactly 'old payload'
+            (Wait-UpdateMarker $f) | Should Be $true
+        }
+        finally { Remove-UpdateFixture $f.Scratch }
+    }
+}

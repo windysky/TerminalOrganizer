@@ -183,12 +183,45 @@ namespace TerminalOrganizer.App
         /// parent actually carries .git (a directory in a plain clone, or the worktree
         /// file in a linked worktree); otherwise null — not a repo checkout.
         /// </summary>
+        /// <summary>v0.2.10: the run-dir marker file name. When the exe runs from a
+        /// deployed copy outside the repo (e.g. %LOCALAPPDATA%\Programs\TerminalOrganizer,
+        /// written by tools\deploy-run-dir.ps1), the repo root is recorded in this file
+        /// next to the exe so the updater can still find the distribution repo.</summary>
+        public const string RepoMarkerFileName = "repo-path.txt";
+
         public static string DeriveRepoRoot()
         {
-            string parent = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, ".."));
-            if (Directory.Exists(Path.Combine(parent, ".git")) || File.Exists(Path.Combine(parent, ".git")))
+            return DeriveRepoRoot(AppContext.BaseDirectory);
+        }
+
+        /// <summary>v0.2.10 seam: the testable form. The exe-relative .git check stays
+        /// PRIMARY (a repo-resident exe — the dev layout — keeps working unchanged); the
+        /// marker is the fallback for a deployed exe. An absent, unreadable, whitespace
+        /// or non-repo marker degrades to null (the zip mode), never throws.</summary>
+        public static string DeriveRepoRoot(string baseDirectory)
+        {
+            try
             {
-                return parent;
+                string parent = Path.GetFullPath(Path.Combine(baseDirectory, ".."));
+                if (Directory.Exists(Path.Combine(parent, ".git")) || File.Exists(Path.Combine(parent, ".git")))
+                {
+                    return parent;
+                }
+                string marker = Path.Combine(baseDirectory, RepoMarkerFileName);
+                if (File.Exists(marker))
+                {
+                    string candidate = File.ReadAllText(marker).Trim();
+                    if (candidate.Length > 0
+                        && (Directory.Exists(Path.Combine(candidate, ".git"))
+                            || File.Exists(Path.Combine(candidate, ".git"))))
+                    {
+                        return candidate;
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                // Degrade to the no-repo (zip) mode.
             }
             return null;
         }
