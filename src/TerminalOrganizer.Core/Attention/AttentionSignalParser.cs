@@ -86,6 +86,9 @@ namespace TerminalOrganizer.Core.Attention
             // ignored, and every payload accepted today stays accepted (degrade-safe).
             signal.Kind = ReadOptionalString(map, "kind");
             signal.Message = ReadOptionalString(map, "message");
+            // v0.2.8 (wsl-toast v1.6.1): the additive remote flag rides the same
+            // optional rule — true only for boolean true, never a rejection.
+            signal.Remote = ReadOptionalBool(map, "remote");
             return AttentionParseResult.Accept(signal);
         }
 
@@ -98,6 +101,18 @@ namespace TerminalOrganizer.Core.Attention
                 return null;
             }
             return value as string;
+        }
+
+        /// <summary>The optional boolean field: true only when the key holds boolean true; absent,
+        /// false and non-bool values all read as false (degrade-safe, never a rejection).</summary>
+        private static bool ReadOptionalBool(Dictionary<string, object> map, string key)
+        {
+            object value;
+            if (!map.TryGetValue(key, out value))
+            {
+                return false;
+            }
+            return value is bool && (bool)value;
         }
     }
 }

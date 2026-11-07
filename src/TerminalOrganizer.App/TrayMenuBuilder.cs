@@ -43,6 +43,9 @@ namespace TerminalOrganizer.App
 
         /// <summary>SPEC-TRAY-014 D-8: the always-on-top checkable row.</summary>
         AttentionTopmost,
+
+        /// <summary>v0.2.8: the remote-alerts level rows (settings-form derived rows; all|asks|off).</summary>
+        AttentionRemoteAlerts,
         LabelsAndPrioritiesRoot,
         LabelWindow,
         LastResult,
@@ -203,6 +206,7 @@ namespace TerminalOrganizer.App
         private readonly bool attentionOverlayTopmost;
         private readonly bool attentionRadioSubmenus;
         private readonly bool supportsUpdate;
+        private readonly string attentionRemoteAlerts = SettingsStore.DefaultRemoteAlerts;
         private readonly Dictionary<long, string> rowTexts;
 
         public TrayMenuState(bool busy, string hotkeyDisplay, MonitorInfo[] monitors, WindowSnapshot[] windows,
@@ -314,9 +318,28 @@ namespace TerminalOrganizer.App
             bool attentionOverlayTopmost, bool attentionRadioSubmenus, bool supportsUpdate)
             : this(busy, hotkeyDisplay, monitors, windows, managerSelector, managerResolution,
                 lastResultText, mergeMenuEnabled, overflowPolicy, windowRowTexts, attentionOverlay,
+                attentionEventPolicy, attentionStopBlinkLimit, attentionOverlayTopmost, attentionRadioSubmenus,
+                supportsUpdate, null)
+        {
+        }
+
+        /// <summary>
+        /// v0.2.8 form: the update-era bundle plus the remote-alerts level token
+        /// (all|asks|off; null and unknown degrade to asks). Only the settings form's
+        /// derived rows read it today — the tray submenu children are unchanged.
+        /// </summary>
+        public TrayMenuState(bool busy, string hotkeyDisplay, MonitorInfo[] monitors, WindowSnapshot[] windows,
+            ManagerSelector managerSelector, ManagerResolution managerResolution, string lastResultText,
+            bool mergeMenuEnabled, OverflowPolicy overflowPolicy, string[] windowRowTexts,
+            bool attentionOverlay, string attentionEventPolicy, int attentionStopBlinkLimit,
+            bool attentionOverlayTopmost, bool attentionRadioSubmenus, bool supportsUpdate,
+            string attentionRemoteAlerts)
+            : this(busy, hotkeyDisplay, monitors, windows, managerSelector, managerResolution,
+                lastResultText, mergeMenuEnabled, overflowPolicy, windowRowTexts, attentionOverlay,
                 attentionEventPolicy, attentionStopBlinkLimit, attentionOverlayTopmost, attentionRadioSubmenus)
         {
             this.supportsUpdate = supportsUpdate;
+            this.attentionRemoteAlerts = SettingsStore.ParseRemoteAlerts(attentionRemoteAlerts);
         }
 
         private TrayMenuState(bool busy, string hotkeyDisplay, MonitorInfo[] monitors, WindowSnapshot[] windows,
@@ -371,6 +394,9 @@ namespace TerminalOrganizer.App
 
         /// <summary>True when this state carries the SPEC-TRAY-015 M2 radio-submenu era flag: Event policy and Stop blinks render as radio submenus (REQ-IA-001).</summary>
         public bool HasAttentionRadioSubmenus { get { return attentionRadioSubmenus; } }
+
+        /// <summary>v0.2.8: the remote-alerts level (all|asks|off); every earlier constructor era defaults asks.</summary>
+        public string AttentionRemoteAlerts { get { return attentionRemoteAlerts; } }
 
         /// <summary>True when this state is SPEC-TRAY-020 update-era: the check/update rows render between Settings and Version (D-7).</summary>
         public bool SupportsUpdate { get { return supportsUpdate; } }
@@ -535,6 +561,7 @@ namespace TerminalOrganizer.App
                 case TrayMenuEntryKind.AttentionEnabled:
                 case TrayMenuEntryKind.AttentionEventPolicy:
                 case TrayMenuEntryKind.AttentionStopBlinks:
+                case TrayMenuEntryKind.AttentionRemoteAlerts:
                 case TrayMenuEntryKind.AttentionTopmost:
                 case TrayMenuEntryKind.OverflowPolicy:
                 case TrayMenuEntryKind.SetManager:
@@ -605,6 +632,18 @@ namespace TerminalOrganizer.App
                 case TrayMenuEntryKind.AttentionTopmost:
                     return new TrayMenuEntry(kind, "Always on top", true, state.AttentionOverlayTopmost,
                         null, null, null, null);
+                case TrayMenuEntryKind.AttentionRemoteAlerts:
+                    if (!string.IsNullOrEmpty(value))
+                    {
+                        // v0.2.8: the radio row for one remote-alerts token — display-name label,
+                        // exactly-one-checked against the state (the Event policy row shape).
+                        return new TrayMenuEntry(kind, RemoteAlertsDisplayName(value), true,
+                            string.Equals(state.AttentionRemoteAlerts, value, StringComparison.Ordinal),
+                            null, null, value, null);
+                    }
+                    return new TrayMenuEntry(kind,
+                        "Remote alerts: " + RemoteAlertsDisplayName(state.AttentionRemoteAlerts),
+                        true, false, null, null, state.AttentionRemoteAlerts, null);
                 case TrayMenuEntryKind.OverflowPolicy:
                     {
                         string label = OverflowPolicyLabel(value);
@@ -1042,6 +1081,20 @@ namespace TerminalOrganizer.App
                 return "Notifications only";
             }
             return policy == null ? string.Empty : policy;
+        }
+
+        /// <summary>v0.2.8: the display name of one remote-alerts token; unknown degrades to the asks label.</summary>
+        private static string RemoteAlertsDisplayName(string token)
+        {
+            if (string.Equals(token, SettingsStore.RemoteAlertsAll, StringComparison.Ordinal))
+            {
+                return "All";
+            }
+            if (string.Equals(token, SettingsStore.RemoteAlertsOff, StringComparison.Ordinal))
+            {
+                return "Off";
+            }
+            return "Asks only";
         }
 
         private static TrayMenuEntry[] BuildOverflowChildren(TrayMenuState state)

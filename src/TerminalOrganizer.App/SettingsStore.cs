@@ -42,6 +42,7 @@ namespace TerminalOrganizer.App
         private readonly bool attentionOverlayTopmost;
         private readonly int attentionInfoVisibleSeconds;
         private readonly bool updateAutoCheckEnabled;
+        private readonly string attentionRemoteAlerts;
 
         public AppSettings(string hotkey, string logPath, string managerWindowName)
             : this(hotkey, logPath, managerWindowName, false)
@@ -183,6 +184,26 @@ namespace TerminalOrganizer.App
             bool crossMonitorRedistribution, TitleRulesSettings titleRules, bool attentionOverlay,
             string attentionEventPolicy, int attentionStopBlinkLimit, bool attentionOverlayTopmost,
             int attentionInfoVisibleSeconds, bool updateAutoCheckEnabled)
+            : this(hotkey, logPath, managerWindowName, mergeEnabled, firstRunCompleted, startWithWindows,
+                managerSelector, priorityOverrides, schemaVersion, overflowPolicy, crossMonitorRedistribution,
+                titleRules, attentionOverlay, attentionEventPolicy, attentionStopBlinkLimit,
+                attentionOverlayTopmost, attentionInfoVisibleSeconds, updateAutoCheckEnabled,
+                SettingsStore.DefaultRemoteAlerts)
+        {
+        }
+
+        /// <summary>
+        /// v0.2.8 full-tail form: also carries the SIXTH attention value — the remote-alerts
+        /// level (all|asks|off; null and unknown degrade to asks through ParseRemoteAlerts).
+        /// Every mid-chain constructor and legacy caller inherits the asks default by
+        /// construction, so no legacy call site changes (the TRAY-016 fifth-value pattern).
+        /// </summary>
+        public AppSettings(string hotkey, string logPath, string managerWindowName, bool mergeEnabled,
+            bool firstRunCompleted, bool startWithWindows, ManagerSelector managerSelector,
+            PriorityOverride[] priorityOverrides, int schemaVersion, OverflowPolicy overflowPolicy,
+            bool crossMonitorRedistribution, TitleRulesSettings titleRules, bool attentionOverlay,
+            string attentionEventPolicy, int attentionStopBlinkLimit, bool attentionOverlayTopmost,
+            int attentionInfoVisibleSeconds, bool updateAutoCheckEnabled, string attentionRemoteAlerts)
         {
             this.titleRules = titleRules;
             this.MergeEnabled = mergeEnabled;
@@ -203,6 +224,7 @@ namespace TerminalOrganizer.App
             this.attentionOverlayTopmost = attentionOverlayTopmost;
             this.attentionInfoVisibleSeconds = attentionInfoVisibleSeconds;
             this.updateAutoCheckEnabled = updateAutoCheckEnabled;
+            this.attentionRemoteAlerts = SettingsStore.ParseRemoteAlerts(attentionRemoteAlerts);
         }
 
         public string Hotkey { get { return hotkey; } }
@@ -264,6 +286,9 @@ namespace TerminalOrganizer.App
         /// non-boolean values load as true; only an explicit boolean false loads as false (the
         /// D-8 file-edit-only key — no settings-form field, no new save site).</summary>
         public bool UpdateAutoCheckEnabled { get { return updateAutoCheckEnabled; } }
+
+        /// <summary>The v0.2.8 remote-alerts level (all|asks|off); every legacy constructor default asks.</summary>
+        public string AttentionRemoteAlerts { get { return attentionRemoteAlerts; } }
 
         /// <summary>The title-rules value; never null (a value built without one behaves as preset none).</summary>
         public TitleRulesSettings TitleRules
@@ -682,6 +707,28 @@ namespace TerminalOrganizer.App
         /// DefaultStopBlinkLimit (D-7's two "10"s); schemaVersion stays 3.</summary>
         public const int DefaultInfoVisibleSeconds = 10;
 
+        /// <summary>v0.2.8 remote alerts: the closed token set and the absent-key default.
+        /// "asks" — a remote (pushed-from-another-machine) signal with no matching window
+        /// surfaces here only when it waits on the user (kind ask); "all" surfaces everything;
+        /// "off" surfaces nothing remote. Local signals are never filtered by this key.</summary>
+        public const string RemoteAlertsAll = "all";
+        public const string RemoteAlertsAsks = "asks";
+        public const string RemoteAlertsOff = "off";
+        public const string DefaultRemoteAlerts = RemoteAlertsAsks;
+
+        /// <summary>v0.2.8 (pure): maps a loaded/set remote-alerts token onto the closed set —
+        /// null, empty and every unknown value degrade to asks (per-key degrade, the
+        /// AttentionPolicyResolver pattern; schemaVersion stays 3).</summary>
+        public static string ParseRemoteAlerts(string value)
+        {
+            if (string.Equals(value, RemoteAlertsAll, StringComparison.Ordinal)
+                || string.Equals(value, RemoteAlertsOff, StringComparison.Ordinal))
+            {
+                return value;
+            }
+            return RemoteAlertsAsks;
+        }
+
         /// <summary>
         /// SPEC-TRAY-016 (plan.md section J, pure): clamps any integer into 1..120 —
         /// 0 and negatives load 1, anything above 120 loads 120.
@@ -793,7 +840,10 @@ namespace TerminalOrganizer.App
                     // SPEC-TRAY-020 (REQ-UPD-013): the update auto-check switch rides the
                     // same camelCase DTO ternary family — absent-key default true, only an
                     // explicit boolean false loads false (D-8).
-                    dto.updateAutoCheckEnabled.HasValue ? dto.updateAutoCheckEnabled.Value : true);
+                    dto.updateAutoCheckEnabled.HasValue ? dto.updateAutoCheckEnabled.Value : true,
+                    // v0.2.8: the sixth attention value rides the same family — absent-key
+                    // default asks, per-key degrade (never a whole-file degradation).
+                    SettingsStore.ParseRemoteAlerts(dto.attentionRemoteAlerts));
             }
             catch (Exception ex)
             {
@@ -831,12 +881,13 @@ namespace TerminalOrganizer.App
                 dto.crossMonitorRedistribution = values.CrossMonitorRedistribution;
                 // @MX:NOTE: SPEC-TRAY-013 REQ-SET-001 — every save writes the resolved boolean (absent key loads as true).
                 dto.attentionOverlay = values.AttentionOverlay;
-                // @MX:NOTE: SPEC-TRAY-014/016 REQ-SET-002 — every save also writes all five resolved attention values
-                // (overlay, policy, limit, topmost, info seconds) so no unrelated save reverts one.
+                // @MX:NOTE: SPEC-TRAY-014/016 REQ-SET-002 — every save also writes all six resolved attention values
+                // (overlay, policy, limit, topmost, info seconds, remote alerts) so no unrelated save reverts one.
                 dto.attentionEventPolicy = values.AttentionEventPolicy;
                 dto.attentionStopBlinkLimit = values.AttentionStopBlinkLimit;
                 dto.attentionOverlayTopmost = values.AttentionOverlayTopmost;
                 dto.attentionInfoVisibleSeconds = values.AttentionInfoVisibleSeconds;
+                dto.attentionRemoteAlerts = values.AttentionRemoteAlerts;
                 // @MX:NOTE: SPEC-TRAY-020 REQ-UPD-013 — every save writes the resolved switch so
                 // no unrelated read-modify-write save reverts a user's explicit false (the
                 // file-edit-only key; the key loads as true while absent).
@@ -1030,6 +1081,7 @@ namespace TerminalOrganizer.App
 
             /// <summary>SPEC-TRAY-020: the startup auto-check switch; null (absent key) loads as true (REQ-UPD-013).</summary>
             public bool? updateAutoCheckEnabled;
+            public string attentionRemoteAlerts;
         }
 
         /// <summary>The persisted B2 canonical manager selector shape; public fields so JavaScriptSerializer maps them.</summary>

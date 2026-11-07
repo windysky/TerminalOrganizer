@@ -119,6 +119,12 @@ namespace TerminalOrganizer.Core.Attention
         /// first paragraph (at most 600 characters), null when the key is absent, null, or
         /// non-string. Recorded verbatim at parse; panel rendering is M3 (REQ-MSG-001).</summary>
         public string Message;
+
+        /// <summary>The additive remote flag (wsl-toast v1.6.1): true exactly when the signal
+        /// was PUSHED from another machine (a remote-viewer push or a background broadcast).
+        /// False when the key is absent, false, or non-bool — a producer without the field is
+        /// local, degrade-safe (the same additive-fields discipline as kind/message).</summary>
+        public bool Remote;
     }
 
     /// <summary>

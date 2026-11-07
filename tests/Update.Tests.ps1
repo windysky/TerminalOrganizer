@@ -139,8 +139,8 @@ Describe 'AC-005 settings key updateAutoCheckEnabled (REQ-UPD-013)' {
         $s.SchemaVersion | Should Be 3
     }
 
-    It 'AppSettings carries exactly 19 properties (AM-2b: 18 -> 19)' {
-        ([TerminalOrganizer.App.AppSettings].GetProperties().Count) | Should Be 19
+    It 'AppSettings carries exactly 20 properties (AM-2b: 18 -> 19; v0.2.8: -> 20)' {
+        ([TerminalOrganizer.App.AppSettings].GetProperties().Count) | Should Be 20
     }
 
     It 'an unrelated save carries the resolved switch through (a user-set false survives a read-modify-write)' {
@@ -160,9 +160,9 @@ Describe 'AC-005 settings key updateAutoCheckEnabled (REQ-UPD-013)' {
 }
 
 Describe 'AC-005 enum growth guards (REQ-UPD-012, plan section J AM-1/AM-2a)' {
-    It 'TrayMenuEntryKind carries exactly 28 members (AM-1: 26 -> 28)' {
+    It 'TrayMenuEntryKind carries exactly 29 members (AM-1: 26 -> 28; v0.2.8: -> 29)' {
         $names = @([Enum]::GetNames([TerminalOrganizer.App.TrayMenuEntryKind]))
-        $names.Count | Should Be 28
+        $names.Count | Should Be 29
     }
 
     It 'both new kinds exist and are DISMISS-classified (IsKeepOpenKind false)' {
@@ -172,10 +172,10 @@ Describe 'AC-005 enum growth guards (REQ-UPD-012, plan section J AM-1/AM-2a)' {
         [TerminalOrganizer.App.TrayMenuBuilder]::IsKeepOpenKind([TerminalOrganizer.App.TrayMenuEntryKind]::UpdateAndRestart) | Should Be $false
     }
 
-    It 'the keep-open set stays exactly the 8 settings-mutation kinds (both new kinds dismiss)' {
+    It 'the keep-open set stays exactly the 9 settings-mutation kinds (both update-era kinds dismiss)' {
         $keep = @([Enum]::GetNames([TerminalOrganizer.App.TrayMenuEntryKind]) |
             Where-Object { [TerminalOrganizer.App.TrayMenuBuilder]::IsKeepOpenKind([TerminalOrganizer.App.TrayMenuEntryKind]$_) })
-        $keep.Count | Should Be 8
+        $keep.Count | Should Be 9
     }
 }
 

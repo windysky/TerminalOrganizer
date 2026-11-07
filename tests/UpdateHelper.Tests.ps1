@@ -104,6 +104,20 @@ function Wait-UpdateMarker($Fixture, [int]$Seconds = 5) {
     return $false
 }
 
+# Bounded-retry cleanup. The helper's detached restart runs the stand-in cmd with the
+# scratch dir as its working directory; while that cmd lives, Windows refuses to
+# delete the dir (and the cmd may still append the marker), so a one-shot
+# Remove-Item silently leaves residue. Retry until the dir is gone or the bound hits.
+function Remove-UpdateFixture([string]$Path, [int]$Seconds = 10) {
+    $deadline = [DateTime]::Now.AddSeconds($Seconds)
+    while (Test-Path $Path) {
+        Remove-Item -Recurse -Force $Path -ErrorAction SilentlyContinue
+        if (-not (Test-Path $Path)) { break }
+        if ([DateTime]::Now -ge $deadline) { break }
+        Start-Sleep -Milliseconds 200
+    }
+}
+
 # A process that is ALREADY gone when the helper starts (the fast PID path).
 function New-UpdateDeadPid {
     $p = Start-Process -FilePath $script:HelperPs51 -ArgumentList '-NoProfile', '-Command', 'exit 0' -PassThru
@@ -156,7 +170,7 @@ Describe 'AC-006 helper happy path on a local fixture repo (REQ-UPD-009/011)' {
         }
         finally {
             if ($null -ne $lockStream) { $lockStream.Close() }
-            Remove-Item -Recurse -Force $f.Scratch -ErrorAction SilentlyContinue
+            Remove-UpdateFixture $f.Scratch
         }
     }
 }
@@ -183,7 +197,7 @@ Describe 'AC-007 helper failure paths: surfaced, never destructive (REQ-UPD-010)
             ($lines | Where-Object { $_ -match ' update: helper restarting$' }).Count | Should Be 1
             (Wait-UpdateMarker $f) | Should Be $true
         }
-        finally { Remove-Item -Recurse -Force $f.Scratch -ErrorAction SilentlyContinue }
+        finally { Remove-UpdateFixture $f.Scratch }
     }
 
     It 'a diverged clone fails the ff-only pull with git error logged, restarts anyway, keeps the local commit' {
@@ -206,7 +220,7 @@ Describe 'AC-007 helper failure paths: surfaced, never destructive (REQ-UPD-010)
             ($lines | Where-Object { $_ -match ' update: helper restarting$' }).Count | Should Be 1
             (Wait-UpdateMarker $f) | Should Be $true
         }
-        finally { Remove-Item -Recurse -Force $f.Scratch -ErrorAction SilentlyContinue }
+        finally { Remove-UpdateFixture $f.Scratch }
     }
 }
 
@@ -237,7 +251,7 @@ Describe 'AC-008 helper lock-wait bounds and PID handling (REQ-UPD-009)' {
         }
         finally {
             if ($null -ne $holder) { $holder.Close() }
-            Remove-Item -Recurse -Force $f.Scratch -ErrorAction SilentlyContinue
+            Remove-UpdateFixture $f.Scratch
         }
     }
 
@@ -262,7 +276,7 @@ Describe 'AC-008 helper lock-wait bounds and PID handling (REQ-UPD-009)' {
         }
         finally {
             if ($null -ne $dummy) { try { $dummy.Kill() } catch { } }
-            Remove-Item -Recurse -Force $f.Scratch -ErrorAction SilentlyContinue
+            Remove-UpdateFixture $f.Scratch
         }
     }
 
@@ -276,7 +290,7 @@ Describe 'AC-008 helper lock-wait bounds and PID handling (REQ-UPD-009)' {
             ($lines | Where-Object { $_ -match ' update: helper app-exit wait done$' }).Count | Should Be 1
             ($lines | Where-Object { $_ -match ' update: helper done$' }).Count | Should Be 1
         }
-        finally { Remove-Item -Recurse -Force $f.Scratch -ErrorAction SilentlyContinue }
+        finally { Remove-UpdateFixture $f.Scratch }
     }
 
     It 'a PID that never exits within the bound: timeout line, pull skipped, restart still attempted' {
@@ -299,7 +313,7 @@ Describe 'AC-008 helper lock-wait bounds and PID handling (REQ-UPD-009)' {
         }
         finally {
             if ($null -ne $dummy) { try { $dummy.Kill() } catch { } }
-            Remove-Item -Recurse -Force $f.Scratch -ErrorAction SilentlyContinue
+            Remove-UpdateFixture $f.Scratch
         }
     }
 }
@@ -356,7 +370,7 @@ Describe 'F3 helper log lines are sanitized like LogSink (REQ-LOG-001/002 parity
             # The stamp is the LogSink shape: 'yyyy-MM-dd HH:mm:ss' + one space.
             ($lines[0] -match '^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} update: ') | Should Be $true
         }
-        finally { Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue }
+        finally { Remove-UpdateFixture $scratch }
     }
 
     It 'the helper mapping equals the app LogSink.Sanitize output for the same input (parity with the real sink)' {
@@ -378,6 +392,17 @@ Describe 'F3 helper log lines are sanitized like LogSink (REQ-LOG-001/002 parity
             $helperLine = @([IO.File]::ReadAllLines($LogPath))[0]
             $helperLine.Substring(20) | Should BeExactly $sinkLine.Substring(20)
         }
-        finally { Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue }
+        finally { Remove-UpdateFixture $scratch }
+    }
+}
+
+# Runs last (Pester 3.4 keeps file order). The helper's fire-and-forget restart runs
+# the stand-in cmd with the fixture scratch dir as its working directory, so a
+# one-shot cleanup racing it leaves the dir behind. Every row must leave nothing.
+Describe 'scratch hygiene: this suite leaves no fixture folders behind' {
+    It 'no scratch-updatehelper-* or scratch-helperlog-* folder remains under tests' {
+        $left = @(Get-ChildItem $here -Directory -Filter 'scratch-*' |
+            Where-Object { $_.Name -match '^scratch-(updatehelper|helperlog)-' })
+        ($left | ForEach-Object { $_.Name }) -join ', ' | Should BeExactly ''
     }
 }

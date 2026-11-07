@@ -152,6 +152,35 @@ Describe 'AC-001 Settings keys: defaults, resolution, clamp (REQ-SET-001)' {
         [TerminalOrganizer.App.SettingsStore]::ClampBlinkLimit(51) | Should Be 50
         [TerminalOrganizer.App.SettingsStore]::ClampBlinkLimit(999) | Should Be 50
     }
+
+    It 'the remote-alerts key defaults to asks; explicit all and off load verbatim; null and unknown degrade to asks' {
+        $absent = New-OptionsSettingsScratch $script:OptsV3Base
+        $all = New-OptionsSettingsScratch ($script:OptsV3Base.TrimEnd('}') + ',"attentionRemoteAlerts":"all"}')
+        $off = New-OptionsSettingsScratch ($script:OptsV3Base.TrimEnd('}') + ',"attentionRemoteAlerts":"off"}')
+        $nulled = New-OptionsSettingsScratch ($script:OptsV3Base.TrimEnd('}') + ',"attentionRemoteAlerts":null}')
+        $bogus = New-OptionsSettingsScratch ($script:OptsV3Base.TrimEnd('}') + ',"attentionRemoteAlerts":"bogus"}')
+        try {
+            (([TerminalOrganizer.App.SettingsStore]::new($absent)).Load()).AttentionRemoteAlerts | Should BeExactly 'asks'
+            (([TerminalOrganizer.App.SettingsStore]::new($all)).Load()).AttentionRemoteAlerts | Should BeExactly 'all'
+            (([TerminalOrganizer.App.SettingsStore]::new($off)).Load()).AttentionRemoteAlerts | Should BeExactly 'off'
+            (([TerminalOrganizer.App.SettingsStore]::new($nulled)).Load()).AttentionRemoteAlerts | Should BeExactly 'asks'
+            (([TerminalOrganizer.App.SettingsStore]::new($bogus)).Load()).AttentionRemoteAlerts | Should BeExactly 'asks'
+        }
+        finally {
+            foreach ($p in @($absent, $all, $off, $nulled, $bogus)) {
+                Remove-Item -Recurse -Force (Split-Path $p) -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
+    It 'the pure remote-alerts resolver maps the closed set and degrades everything else to asks' {
+        [TerminalOrganizer.App.SettingsStore]::ParseRemoteAlerts('all') | Should BeExactly 'all'
+        [TerminalOrganizer.App.SettingsStore]::ParseRemoteAlerts('asks') | Should BeExactly 'asks'
+        [TerminalOrganizer.App.SettingsStore]::ParseRemoteAlerts('off') | Should BeExactly 'off'
+        [TerminalOrganizer.App.SettingsStore]::ParseRemoteAlerts('bogus') | Should BeExactly 'asks'
+        [TerminalOrganizer.App.SettingsStore]::ParseRemoteAlerts($null) | Should BeExactly 'asks'
+        [TerminalOrganizer.App.SettingsStore]::ParseRemoteAlerts('') | Should BeExactly 'asks'
+    }
 }
 
 Describe 'AC-002 Every save path carries all four attention values (REQ-SET-002)' {
@@ -244,6 +273,33 @@ Describe 'AC-002 Every save path carries all four attention values (REQ-SET-002)
             $s.AttentionStopBlinkLimit | Should Be 5
             $s.AttentionOverlayTopmost | Should Be $true
             $s.OverflowPolicy.ToString() | Should BeExactly 'Merge'
+        }
+        finally { Remove-Item -Recurse -Force (Split-Path $path) -ErrorAction SilentlyContinue }
+    }
+
+    It 'every existing save path carries the sixth attention value: remote alerts survive an unrelated attention save' {
+        $path = New-OptionsSettingsScratch ($script:OptsCarryBase.TrimEnd('}') + ',"attentionRemoteAlerts":"off"}')
+        try {
+            $store = [TerminalOrganizer.App.SettingsStore]::new($path)
+            $null = (Get-OptionsShellMethod 'SaveAttentionEventPolicyTo').Invoke($null, @($store, 'all'))
+            $s = $store.Load()
+            $s.AttentionRemoteAlerts | Should BeExactly 'off'
+            $s.AttentionEventPolicy | Should BeExactly 'all'
+        }
+        finally { Remove-Item -Recurse -Force (Split-Path $path) -ErrorAction SilentlyContinue }
+    }
+
+    It 'the remote-alerts helper writes the clicked token through the bundle and keeps the other five' {
+        $path = New-OptionsSettingsScratch $script:OptsCarryBase
+        try {
+            $store = [TerminalOrganizer.App.SettingsStore]::new($path)
+            $null = (Get-OptionsShellMethod 'SaveAttentionRemoteAlertsTo').Invoke($null, @($store, 'off'))
+            $s = $store.Load()
+            $s.AttentionRemoteAlerts | Should BeExactly 'off'
+            $s.AttentionOverlay | Should Be $false
+            $s.AttentionEventPolicy | Should BeExactly 'notifications'
+            $s.AttentionStopBlinkLimit | Should Be 5
+            $s.AttentionOverlayTopmost | Should Be $true
         }
         finally { Remove-Item -Recurse -Force (Split-Path $path) -ErrorAction SilentlyContinue }
     }

@@ -10,9 +10,9 @@ namespace TerminalOrganizer.App
     /// SPEC-TRAY-015 M3 (REQ-WIN-001; AM-2, the ELECTED supersession of the
     /// TRAY-007 section 1.1/6 and TRAY-014 section 5 windowless commitments):
     /// ONE modeless settings form over the EXISTING settings surface only —
-    /// attention enable / event policy / stop blinks / topmost, overflow policy,
-    /// manager selection. Every write routes through the six existing static
-    /// save helpers (REQ-PERSIST-001; the every-save-path-carries-all-four rule
+    /// attention enable / event policy / stop blinks / remote alerts / topmost,
+    /// overflow policy, manager selection. Every write routes through the seven
+    /// existing static save helpers (REQ-PERSIST-001; the every-save-path-carries-all rule
     /// holds by construction) and applies to the live attention controller;
     /// no new settings key exists. Reads render through the SAME shared
     /// TrayMenuBuilder derivation the menu renders from (plan.md B7: the window
@@ -34,6 +34,14 @@ namespace TerminalOrganizer.App
             AttentionPolicyResolver.PolicyNotifications
         };
 
+        /// <summary>v0.2.8: the remote-alerts tokens in display order (All / Asks only / Off).</summary>
+        private static readonly string[] RemoteAlertTokens = new string[]
+        {
+            SettingsStore.RemoteAlertsAll,
+            SettingsStore.RemoteAlertsAsks,
+            SettingsStore.RemoteAlertsOff
+        };
+
         /// <summary>The overflow row value ids in the shipped order (the C3 rows; merge disabled by the release gate).</summary>
         private static readonly string[] OverflowRowIds = new string[] { "ask", "stackOnly", "merge", "moveLowest" };
 
@@ -46,6 +54,7 @@ namespace TerminalOrganizer.App
         private readonly CheckBox attentionTopmost;
         private readonly RadioButton[] policyRows;
         private readonly RadioButton[] blinkRows;
+        private readonly RadioButton[] remoteAlertRows;
         private readonly RadioButton[] overflowRows;
         private readonly ComboBox managerChoice;
         private bool suppressEvents;
@@ -68,7 +77,7 @@ namespace TerminalOrganizer.App
 
             Text = "TerminalOrganizer settings";
             Width = 460;
-            Height = 442;
+            Height = 462;
             FormBorderStyle = FormBorderStyle.FixedDialog;
             StartPosition = FormStartPosition.CenterScreen;
             MinimizeBox = false;
@@ -81,7 +90,7 @@ namespace TerminalOrganizer.App
             attentionGroup.Left = 12;
             attentionGroup.Top = 12;
             attentionGroup.Width = 420;
-            attentionGroup.Height = 160;
+            attentionGroup.Height = 180;
 
             this.attentionEnabled = new CheckBox();
             this.attentionEnabled.AutoSize = true;
@@ -144,10 +153,37 @@ namespace TerminalOrganizer.App
                 this.blinkRows[i] = row;
             }
 
+            System.Windows.Forms.Label remoteCaption = new System.Windows.Forms.Label();
+            remoteCaption.AutoSize = true;
+            remoteCaption.Left = 16;
+            remoteCaption.Top = 118;
+            remoteCaption.Text = "Remote alerts:";
+            attentionGroup.Controls.Add(remoteCaption);
+
+            int[] remoteLefts = new int[] { 120, 180, 225 };
+            this.remoteAlertRows = new RadioButton[RemoteAlertTokens.Length];
+            for (int i = 0; i < RemoteAlertTokens.Length; i++)
+            {
+                string token = RemoteAlertTokens[i];
+                RadioButton row = new RadioButton();
+                row.AutoSize = true;
+                row.Left = remoteLefts[i];
+                row.Top = 114;
+                row.CheckedChanged += delegate
+                {
+                    if (row.Checked)
+                    {
+                        ApplyAttentionRemoteAlerts(token);
+                    }
+                };
+                attentionGroup.Controls.Add(row);
+                this.remoteAlertRows[i] = row;
+            }
+
             this.attentionTopmost = new CheckBox();
             this.attentionTopmost.AutoSize = true;
             this.attentionTopmost.Left = 16;
-            this.attentionTopmost.Top = 118;
+            this.attentionTopmost.Top = 146;
             this.attentionTopmost.CheckedChanged += delegate { ApplyAttentionTopmost(); };
             attentionGroup.Controls.Add(this.attentionTopmost);
             Controls.Add(attentionGroup);
@@ -156,7 +192,7 @@ namespace TerminalOrganizer.App
             GroupBox overflowGroup = new GroupBox();
             overflowGroup.Text = "Overflow behavior";
             overflowGroup.Left = 12;
-            overflowGroup.Top = 178;
+            overflowGroup.Top = 198;
             overflowGroup.Width = 420;
             overflowGroup.Height = 128;
 
@@ -184,7 +220,7 @@ namespace TerminalOrganizer.App
             GroupBox managerGroup = new GroupBox();
             managerGroup.Text = "Manager";
             managerGroup.Left = 12;
-            managerGroup.Top = 312;
+            managerGroup.Top = 332;
             managerGroup.Width = 420;
             managerGroup.Height = 64;
 
@@ -245,6 +281,14 @@ namespace TerminalOrganizer.App
                         AttentionBlinkLimits.Shipped[i].ToString(CultureInfo.InvariantCulture), state);
                     this.blinkRows[i].Text = row.Label;
                     this.blinkRows[i].Checked = row.Checked;
+                }
+
+                for (int i = 0; i < this.remoteAlertRows.Length; i++)
+                {
+                    TrayMenuEntry row = TrayMenuBuilder.DeriveSettingsEntry(
+                        TrayMenuEntryKind.AttentionRemoteAlerts, RemoteAlertTokens[i], state);
+                    this.remoteAlertRows[i].Text = row.Label;
+                    this.remoteAlertRows[i].Checked = row.Checked;
                 }
 
                 TrayMenuEntry topmostRow = TrayMenuBuilder.DeriveSettingsEntry(
@@ -364,6 +408,24 @@ namespace TerminalOrganizer.App
             }
             this.log.Append("attention overlay stop blinks set to "
                 + limit.ToString(CultureInfo.InvariantCulture));
+            RefreshFromSettings();
+        }
+
+        /// <summary>v0.2.8: the remote-alerts radio row — the token save through the same
+        /// bundle as every attention value, applied to the live controller (the form's
+        /// mirror of SelectAttentionEventPolicy).</summary>
+        private void ApplyAttentionRemoteAlerts(string token)
+        {
+            if (this.suppressEvents)
+            {
+                return;
+            }
+            TrayShell.SaveAttentionRemoteAlertsTo(this.settings, token);
+            if (this.attention != null)
+            {
+                this.attention.SetRemoteAlerts(token);
+            }
+            this.log.Append("attention remote alerts set to " + token);
             RefreshFromSettings();
         }
 

@@ -14,7 +14,7 @@ $appExe = Join-Path $repoRoot 'bin\TerminalOrganizer.App.exe'
 [void][Reflection.Assembly]::Load([IO.File]::ReadAllBytes($appExe))
 
 # Message and Kind stay untyped: a [string] parameter would turn $null into an empty string.
-function New-ZSignal([string]$Event, [string]$Needle, $Message = $null, $Kind = $null) {
+function New-ZSignal([string]$Event, [string]$Needle, $Message = $null, $Kind = $null, [switch]$Remote) {
     $signal = New-Object TerminalOrganizer.Core.Attention.AttentionSignal
     $signal.Version = 1
     $signal.Event = $Event
@@ -22,6 +22,7 @@ function New-ZSignal([string]$Event, [string]$Needle, $Message = $null, $Kind = 
     # Assigning $null to the string fields would store an empty string (and read as an unknown kind).
     if ($null -ne $Message) { $signal.Message = $Message }
     if ($null -ne $Kind) { $signal.Kind = $Kind }
+    if ($Remote) { $signal.Remote = $true }
     return $signal
 }
 
@@ -210,5 +211,82 @@ Describe 'Zero-match tray notice (card t18)' {
         $m.Success | Should Be $true
         $m.Value | Should Match 'ShowAttentionBalloon'
         $text | Should Match 'ShowBalloonTip\(\d+, title, text, ToolTipIcon\.Info\)'
+    }
+}
+
+function Install-ZSound($Controller) {
+    $script:ZSounds = New-Object 'System.Collections.Generic.List[string]'
+    $Controller.SetAskSound([Action]{ $script:ZSounds.Add('played') }, [Func[long]]{ param() $script:ZNow })
+}
+
+Describe 'Zero-match remote filter (v0.2.8 remote alerts)' {
+    # A REMOTE signal (pushed from another machine by wsl-toast v1.6.1) that matches no
+    # window is a background alert for a session this machine is not viewing; the
+    # remote-alerts level decides whether it surfaces here. Local signals and matched
+    # remote signals (a tab this machine IS viewing) are never filtered.
+    It 'default level asks: a REMOTE stop with no window skips the notice and logs the skip' {
+        $c = New-ZController
+        Install-ZNotice $c
+        Send-ZSignal $c (New-ZSignal 'stop' 'zzzneedle' -Remote)
+        $script:ZNotices.Count | Should Be 0
+        (Get-ZPrimary)[0] | Should BeExactly 'attention: event=stop needle="zzzneedle" matched=0 (no window; tray notice skipped, remote asks)'
+        $c.Dispose()
+    }
+
+    It 'default level asks: a REMOTE ask (kind ask) still raises the notice' {
+        $c = New-ZController
+        Install-ZNotice $c
+        Send-ZSignal $c (New-ZSignal 'notification' 'zzzneedle' $null 'ask' -Remote)
+        $script:ZNotices.Count | Should Be 1
+        $c.Dispose()
+    }
+
+    It 'level off: even a REMOTE ask skips the notice (and the ask sound stays silent)' {
+        $c = New-ZController
+        $c.SetRemoteAlerts('off')
+        Install-ZNotice $c
+        Install-ZSound $c
+        Send-ZSignal $c (New-ZSignal 'notification' 'zzzneedle' $null 'ask' -Remote)
+        $script:ZNotices.Count | Should Be 0
+        $script:ZSounds.Count | Should Be 0
+        (Get-ZPrimary)[0] | Should BeExactly 'attention: event=notification needle="zzzneedle" matched=0 (no window; tray notice skipped, remote off)'
+        $c.Dispose()
+    }
+
+    It 'level all: a REMOTE stop raises the notice (everything surfaces)' {
+        $c = New-ZController
+        $c.SetRemoteAlerts('all')
+        Install-ZNotice $c
+        Send-ZSignal $c (New-ZSignal 'stop' 'zzzneedle' -Remote)
+        $script:ZNotices.Count | Should Be 1
+        $c.Dispose()
+    }
+
+    It 'level off never silences a LOCAL signal (own-machine behavior unchanged)' {
+        $c = New-ZController
+        $c.SetRemoteAlerts('off')
+        Install-ZNotice $c
+        Install-ZSound $c
+        Send-ZSignal $c (New-ZSignal 'notification' 'zzzneedle' $null 'ask')
+        $script:ZNotices.Count | Should Be 1
+        $script:ZSounds.Count | Should Be 1
+        $c.Dispose()
+    }
+
+    It 'a matched REMOTE signal is never filtered (a tab this machine views always rings)' {
+        $c = New-ZController
+        $c.SetRemoteAlerts('off')
+        Install-ZNotice $c
+        Send-ZSignal $c (New-ZSignal 'stop' 'alpha' -Remote)
+        $script:ZNotices.Count | Should Be 0
+        (Get-ZPrimary)[0] | Should BeExactly 'attention: event=stop needle="alpha" matched=1'
+        $c.Dispose()
+    }
+
+    It 'SetRemoteAlerts degrades an unknown token to asks' {
+        $c = New-ZController
+        $c.SetRemoteAlerts('bogus')
+        $c.RemoteAlerts | Should BeExactly 'asks'
+        $c.Dispose()
     }
 }

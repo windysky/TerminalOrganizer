@@ -147,12 +147,12 @@ function Get-StayMethodBody([string]$Name) {
 }
 
 Describe 'AC-001 stay-open classification (REQ-STAY-004)' {
-    It 'the keep-open set is exactly the 8 settings-mutation kinds' {
+    It 'the keep-open set is exactly the 9 settings-mutation kinds' {
         $expected = @('AttentionOverlay', 'AttentionEnabled', 'AttentionEventPolicy',
-            'AttentionStopBlinks', 'AttentionTopmost', 'OverflowPolicy', 'SetManager', 'ClearManager')
+            'AttentionStopBlinks', 'AttentionRemoteAlerts', 'AttentionTopmost', 'OverflowPolicy', 'SetManager', 'ClearManager')
         $keep = @([Enum]::GetNames([TerminalOrganizer.App.TrayMenuEntryKind]) |
             Where-Object { [TerminalOrganizer.App.TrayMenuBuilder]::IsKeepOpenKind([TerminalOrganizer.App.TrayMenuEntryKind]$_) })
-        $keep.Count | Should Be 8
+        $keep.Count | Should Be 9
         (($keep | Sort-Object) -join ',') | Should BeExactly (($expected | Sort-Object) -join ',')
     }
 
@@ -167,12 +167,12 @@ Describe 'AC-001 stay-open classification (REQ-STAY-004)' {
         (($dismiss | Sort-Object) -join ',') | Should BeExactly (($expectedDismiss | Sort-Object) -join ',')
     }
 
-    It 'the partition is exhaustive over all 28 members: 8 keep-open + 20 dismiss, no member unclassified' {
+    It 'the partition is exhaustive over all 29 members: 9 keep-open + 20 dismiss, no member unclassified' {
         $names = @([Enum]::GetNames([TerminalOrganizer.App.TrayMenuEntryKind]))
-        $names.Count | Should Be 28
+        $names.Count | Should Be 29
         $keep = @($names | Where-Object { [TerminalOrganizer.App.TrayMenuBuilder]::IsKeepOpenKind([TerminalOrganizer.App.TrayMenuEntryKind]$_) })
         $dismiss = @($names | Where-Object { -not [TerminalOrganizer.App.TrayMenuBuilder]::IsKeepOpenKind([TerminalOrganizer.App.TrayMenuEntryKind]$_) })
-        $keep.Count | Should Be 8
+        $keep.Count | Should Be 9
         $dismiss.Count | Should Be 20
         ((@($keep) + @($dismiss) | Sort-Object) -join ',') | Should BeExactly (($names | Sort-Object) -join ',')
     }
@@ -296,10 +296,11 @@ Describe 'AC-002 save-helper reuse and carry-through (REQ-PERSIST-001)' {
         ([regex]::Matches($script:StayCtx, 'store\.Save\(new AppSettings')).Count | Should Be 3
     }
 
-    It 'no new settings key appears in the store DTO: AppSettings still carries exactly the 17 shipped properties, schema 3' {
+    It 'no new settings key appears in the store DTO: AppSettings still carries exactly the 18 shipped properties, schema 3' {
         # Hand-derived from SettingsStore.cs: the 16 save-constructor fields plus the
-        # computed HasTitleRules convenience property (the DTO's one non-persisted member).
-        ([TerminalOrganizer.App.AppSettings].GetProperties().Count) | Should Be 19
+        # computed HasTitleRules convenience property (the DTO's one non-persisted member),
+        # plus the v0.2.8 remote-alerts value.
+        ([TerminalOrganizer.App.AppSettings].GetProperties().Count) | Should Be 20
         $path = New-StaySettingsScratch $script:StayCarryBase
         try {
             (([TerminalOrganizer.App.SettingsStore]::new($path)).Load()).SchemaVersion | Should Be 3

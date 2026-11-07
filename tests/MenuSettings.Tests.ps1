@@ -112,20 +112,20 @@ Describe 'AC-008 settings-row activation (REQ-WIN-001: the reserved row opens th
         $kinds[$slot + 1] | Should BeExactly 'Version'
     }
 
-    It 'the Settings row keeps its DISMISS classification (the REQ-STAY-004 partition is untouched by M3: 8 keep-open / 20 dismiss over all 28 members)' {
+    It 'the Settings row keeps its DISMISS classification (the REQ-STAY-004 partition: 9 keep-open / 20 dismiss over all 29 members)' {
         # REQ-WIN-001: "the Settings kind's classification stays dismiss (the
         # menu closes; the form opens)". The full partition re-check is the
         # M1/M2 inheritance (plan.md A-2 iteration-2 N1: 8/18 exhaustive;
-        # SPEC-TRAY-020 AM re-base: 8/20 over 28).
+        # SPEC-TRAY-020 AM re-base: 8/20 over 28; v0.2.8: 9/20 over 29).
         [TerminalOrganizer.App.TrayMenuBuilder]::IsKeepOpenKind(
             [TerminalOrganizer.App.TrayMenuEntryKind]::Settings) | Should Be $false
         $members = [enum]::GetNames([TerminalOrganizer.App.TrayMenuEntryKind])
-        $members.Count | Should Be 28
+        $members.Count | Should Be 29
         $keep = @($members | Where-Object { [TerminalOrganizer.App.TrayMenuBuilder]::IsKeepOpenKind(
             [TerminalOrganizer.App.TrayMenuEntryKind]::Parse([TerminalOrganizer.App.TrayMenuEntryKind], $_)) })
         $dismiss = @($members | Where-Object { -not [TerminalOrganizer.App.TrayMenuBuilder]::IsKeepOpenKind(
             [TerminalOrganizer.App.TrayMenuEntryKind]::Parse([TerminalOrganizer.App.TrayMenuEntryKind], $_)) })
-        $keep.Count | Should Be 8
+        $keep.Count | Should Be 9
         $dismiss.Count | Should Be 20
     }
 
@@ -175,12 +175,13 @@ Describe 'AC-008 the settings form (ONE form over the EXISTING surface)' {
     }
 }
 
-Describe 'AC-008 save routing (REQ-PERSIST-001: writes through the six existing static helpers)' {
-    It 'the form write surface is exactly the six existing static save helpers' {
+Describe 'AC-008 save routing (REQ-PERSIST-001: writes through the seven existing static helpers)' {
+    It 'the form write surface is exactly the seven existing static save helpers' {
         ($null -ne $script:SetForm) | Should Be $true
         foreach ($helper in @(
             'ToggleAttentionOverlayTo', 'SaveAttentionEventPolicyTo', 'SaveAttentionStopBlinksTo',
-            'SaveAttentionTopmostTo', 'SaveManagerSelectorTo', 'SaveOverflowPolicyTo')) {
+            'SaveAttentionTopmostTo', 'SaveAttentionRemoteAlertsTo',
+            'SaveManagerSelectorTo', 'SaveOverflowPolicyTo')) {
             ($script:SetForm.Contains($helper)) | Should Be $true
         }
     }
@@ -191,10 +192,10 @@ Describe 'AC-008 save routing (REQ-PERSIST-001: writes through the six existing 
         ([regex]::Matches($script:SetForm, 'store\.Save')).Count | Should Be 0
     }
 
-    It 'no new settings key: AppSettings still carries exactly the 17 shipped properties, schemaVersion 3' {
-        # The MenuStayOpen DTO pin, re-asserted post-M3 (REQ-PERSIST-001 binds
-        # M1 and M3 equally; the 16 save-constructor fields + HasTitleRules).
-        ([TerminalOrganizer.App.AppSettings].GetProperties().Count) | Should Be 19
+    It 'the settings surface gained exactly one key since M3: AppSettings carries 20 properties (v0.2.8 remote alerts), schemaVersion 3' {
+        # The MenuStayOpen DTO pin, re-asserted post-M3 and post-v0.2.8 (REQ-PERSIST-001 binds
+        # M1 and M3 equally; the 16 save-constructor fields + HasTitleRules + remote alerts).
+        ([TerminalOrganizer.App.AppSettings].GetProperties().Count) | Should Be 20
         $scratch = Join-Path $here ('scratch-set-' + [Guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $scratch | Out-Null
         $path = Join-Path $scratch 'settings.json'
@@ -205,11 +206,11 @@ Describe 'AC-008 save routing (REQ-PERSIST-001: writes through the six existing 
         finally { Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue }
     }
 
-    It 'the form applies attention writes to the live controller (SetEnabled / SetEventPolicy / SetStopBlinkLimit / SetTopmost)' {
+    It 'the form applies attention writes to the live controller (SetEnabled / SetEventPolicy / SetStopBlinkLimit / SetTopmost / SetRemoteAlerts)' {
         # The menu handlers' contract (TrayContext's attention rows): every
         # attention save also flips the controller. The form mirrors it.
         ($null -ne $script:SetForm) | Should Be $true
-        foreach ($setter in @('SetEnabled', 'SetEventPolicy', 'SetStopBlinkLimit', 'SetTopmost')) {
+        foreach ($setter in @('SetEnabled', 'SetEventPolicy', 'SetStopBlinkLimit', 'SetTopmost', 'SetRemoteAlerts')) {
             ($script:SetForm.Contains($setter)) | Should Be $true
         }
     }
@@ -272,9 +273,9 @@ Describe 'AC-008 single-instance entry point (REQ-WIN-001; NFR-3 tag site)' {
 }
 
 Describe 'AC-008 regression net (partition / era / derivation untouched by M3)' {
-    It 'the 26-member keep-open set is still exactly the 8 settings-mutation kinds' {
+    It 'the keep-open set is still exactly the 9 settings-mutation kinds' {
         $expected = @('AttentionOverlay', 'AttentionEnabled', 'AttentionEventPolicy',
-            'AttentionStopBlinks', 'AttentionTopmost', 'OverflowPolicy', 'SetManager', 'ClearManager')
+            'AttentionStopBlinks', 'AttentionRemoteAlerts', 'AttentionTopmost', 'OverflowPolicy', 'SetManager', 'ClearManager')
         $members = [enum]::GetNames([TerminalOrganizer.App.TrayMenuEntryKind])
         $keep = @($members | Where-Object { [TerminalOrganizer.App.TrayMenuBuilder]::IsKeepOpenKind(
             [TerminalOrganizer.App.TrayMenuEntryKind]::Parse([TerminalOrganizer.App.TrayMenuEntryKind], $_)) })

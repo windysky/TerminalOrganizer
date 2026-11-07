@@ -749,7 +749,7 @@ namespace TerminalOrganizer.App
             this.attention = AttentionController.CreateProduction(this.log, this.messageWindow,
                 AttentionSignalDirectory(), current.AttentionOverlay, current.AttentionEventPolicy,
                 current.AttentionStopBlinkLimit, current.AttentionOverlayTopmost,
-                current.AttentionInfoVisibleSeconds);
+                current.AttentionInfoVisibleSeconds, current.AttentionRemoteAlerts);
             // Card t18: a signal that rings no window gets a tray balloon, because the producer skips its own
             // toast and flash while the organizer heartbeat is fresh.
             this.attention.SetZeroMatchNotice(
@@ -1196,7 +1196,8 @@ namespace TerminalOrganizer.App
                 this.lastResultText, current.MergeEnabled, current.OverflowPolicy, rowTexts,
                 current.AttentionOverlay, current.AttentionEventPolicy,
                 current.AttentionStopBlinkLimit, current.AttentionOverlayTopmost,
-                attentionRadioSubmenus: true, supportsUpdate: this.updateSupported);
+                attentionRadioSubmenus: true, supportsUpdate: this.updateSupported,
+                attentionRemoteAlerts: current.AttentionRemoteAlerts);
         }
 
         /// <summary>Walks the live tree (the busy-flip shape): every settings-mutation
@@ -1705,13 +1706,14 @@ namespace TerminalOrganizer.App
         }
 
         // @MX:NOTE: static toggle save so the round trip is testable (the SaveManagerSelectorTo pattern); carries every other field through.
-        // SPEC-TRAY-014/016 REQ-SET-002: the toggle and the three option saves each carry ALL FIVE attention values.
+        // SPEC-TRAY-014/016 REQ-SET-002: the toggle and the option saves each carry ALL SIX attention values.
         internal static bool ToggleAttentionOverlayTo(SettingsStore store)
         {
             AppSettings current = store.Load();
             bool value = !current.AttentionOverlay;
             SaveAttentionBundle(store, current, value, current.AttentionEventPolicy,
-                current.AttentionStopBlinkLimit, current.AttentionOverlayTopmost);
+                current.AttentionStopBlinkLimit, current.AttentionOverlayTopmost,
+                current.AttentionRemoteAlerts);
             return value;
         }
 
@@ -1721,7 +1723,7 @@ namespace TerminalOrganizer.App
             AppSettings current = store.Load();
             SaveAttentionBundle(store, current, current.AttentionOverlay,
                 AttentionPolicyResolver.Parse(policy), current.AttentionStopBlinkLimit,
-                current.AttentionOverlayTopmost);
+                current.AttentionOverlayTopmost, current.AttentionRemoteAlerts);
         }
 
         /// <summary>SPEC-TRAY-014 D-9: persists the stop blink limit (clamped 1..50 before it reaches here).</summary>
@@ -1729,7 +1731,8 @@ namespace TerminalOrganizer.App
         {
             AppSettings current = store.Load();
             SaveAttentionBundle(store, current, current.AttentionOverlay, current.AttentionEventPolicy,
-                SettingsStore.ClampBlinkLimit(limit), current.AttentionOverlayTopmost);
+                SettingsStore.ClampBlinkLimit(limit), current.AttentionOverlayTopmost,
+                current.AttentionRemoteAlerts);
         }
 
         /// <summary>SPEC-TRAY-014 (the D-6 extension): persists the always-on-top setting.</summary>
@@ -1737,20 +1740,30 @@ namespace TerminalOrganizer.App
         {
             AppSettings current = store.Load();
             SaveAttentionBundle(store, current, current.AttentionOverlay, current.AttentionEventPolicy,
-                current.AttentionStopBlinkLimit, topmost);
+                current.AttentionStopBlinkLimit, topmost, current.AttentionRemoteAlerts);
+        }
+
+        /// <summary>v0.2.8: persists the remote-alerts level (a token from the settings form).</summary>
+        internal static void SaveAttentionRemoteAlertsTo(SettingsStore store, string value)
+        {
+            AppSettings current = store.Load();
+            SaveAttentionBundle(store, current, current.AttentionOverlay, current.AttentionEventPolicy,
+                current.AttentionStopBlinkLimit, current.AttentionOverlayTopmost,
+                SettingsStore.ParseRemoteAlerts(value));
         }
 
         /// <summary>The one read-modify-write every attention save funnels through (sole writer; all other fields carried).</summary>
         private static void SaveAttentionBundle(SettingsStore store, AppSettings current,
-            bool enable, string policy, int limit, bool topmost)
+            bool enable, string policy, int limit, bool topmost, string remoteAlerts)
         {
-            // SPEC-TRAY-016 (REQ-PREF-001): the fifth attention value threads through the same
-            // construction — every attention save carries all five values.
+            // SPEC-TRAY-016 (REQ-PREF-001) + v0.2.8: the fifth and sixth attention values
+            // thread through the same construction — every attention save carries all six.
             store.Save(new AppSettings(current.Hotkey, current.LogPath, current.ManagerWindowName,
                 current.MergeEnabled, current.FirstRunCompleted, current.StartWithWindows,
                 current.ManagerSelector, current.PriorityOverrides, current.SchemaVersion,
                 current.OverflowPolicy, current.CrossMonitorRedistribution, current.TitleRules,
-                enable, policy, limit, topmost, current.AttentionInfoVisibleSeconds));
+                enable, policy, limit, topmost, current.AttentionInfoVisibleSeconds,
+                current.UpdateAutoCheckEnabled, remoteAlerts));
         }
 
         /// <summary>The producer's signal directory (plan.md section J): %LOCALAPPDATA%\wsl-toast\attention.
@@ -1775,7 +1788,8 @@ namespace TerminalOrganizer.App
         }
 
         // @MX:NOTE: the two tray saves are static so the title-rules block they carry is testable (REQ-SET-002); both keep the block of the settings they read.
-        // SPEC-TRAY-013 (plan.md F row 10) + SPEC-TRAY-014/016 (REQ-SET-002): both carry ALL FIVE attention values through so no unrelated save reverts one.
+        // SPEC-TRAY-013 (plan.md F row 10) + SPEC-TRAY-014/016 (REQ-SET-002): both carry ALL SIX attention values
+        // (and, since v0.2.8, the loaded update auto-check switch — the old chain re-derived it as true).
         internal static void SaveManagerSelectorTo(SettingsStore store, ManagerSelector selector)
         {
             ManagerSelector value = selector == null ? ManagerSelector.None() : selector;
@@ -1786,7 +1800,8 @@ namespace TerminalOrganizer.App
                 current.PriorityOverrides, current.SchemaVersion, current.OverflowPolicy,
                 current.CrossMonitorRedistribution, current.TitleRules, current.AttentionOverlay,
                 current.AttentionEventPolicy, current.AttentionStopBlinkLimit, current.AttentionOverlayTopmost,
-                current.AttentionInfoVisibleSeconds));
+                current.AttentionInfoVisibleSeconds, current.UpdateAutoCheckEnabled,
+                current.AttentionRemoteAlerts));
         }
 
         internal static void SaveOverflowPolicyTo(SettingsStore store, OverflowPolicy policy)
@@ -1797,7 +1812,8 @@ namespace TerminalOrganizer.App
                 current.ManagerSelector, current.PriorityOverrides, current.SchemaVersion,
                 policy, policy == OverflowPolicy.Redistribute, current.TitleRules, current.AttentionOverlay,
                 current.AttentionEventPolicy, current.AttentionStopBlinkLimit, current.AttentionOverlayTopmost,
-                current.AttentionInfoVisibleSeconds));
+                current.AttentionInfoVisibleSeconds, current.UpdateAutoCheckEnabled,
+                current.AttentionRemoteAlerts));
         }
 
         /// <summary>The row value ids (B2 shipped) mapped back to the policy — the

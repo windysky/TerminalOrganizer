@@ -453,8 +453,8 @@ Describe 'AC-006 wiring and persistence guards (the M1 machinery ride-through)' 
         ([regex]::Matches($script:IaCtx, 'store\.Save\(new AppSettings')).Count | Should Be 3
     }
 
-    It 'no new settings key: AppSettings still carries exactly the 18 shipped properties, schema 3' {
-        ([TerminalOrganizer.App.AppSettings].GetProperties().Count) | Should Be 19
+    It 'no new settings key: AppSettings still carries exactly the 19 shipped properties (+ v0.2.8 remote alerts), schema 3' {
+        ([TerminalOrganizer.App.AppSettings].GetProperties().Count) | Should Be 20
         $path = New-IaSettingsScratch $script:IaCarryBase
         try {
             (([TerminalOrganizer.App.SettingsStore]::new($path)).Load()).SchemaVersion | Should Be 3
@@ -462,9 +462,9 @@ Describe 'AC-006 wiring and persistence guards (the M1 machinery ride-through)' 
         finally { Remove-Item -Recurse -Force (Split-Path $path) -ErrorAction SilentlyContinue }
     }
 
-    It 'the keep-open partition is unchanged by the radio shape: still 26 members, radio kinds keep-open, sub-roots dismiss' {
+    It 'the keep-open partition is unchanged by the radio shape: 29 members, radio kinds keep-open, sub-roots dismiss' {
         $names = @([Enum]::GetNames([TerminalOrganizer.App.TrayMenuEntryKind]))
-        $names.Count | Should Be 28
+        $names.Count | Should Be 29
         [TerminalOrganizer.App.TrayMenuBuilder]::IsKeepOpenKind([TerminalOrganizer.App.TrayMenuEntryKind]::AttentionEventPolicy) | Should Be $true
         [TerminalOrganizer.App.TrayMenuBuilder]::IsKeepOpenKind([TerminalOrganizer.App.TrayMenuEntryKind]::AttentionStopBlinks) | Should Be $true
         [TerminalOrganizer.App.TrayMenuBuilder]::IsKeepOpenKind([TerminalOrganizer.App.TrayMenuEntryKind]::AttentionRoot) | Should Be $false

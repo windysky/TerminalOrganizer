@@ -105,6 +105,11 @@ namespace TerminalOrganizer.App
         // from the TICK-unit stopBlinkLimit — D-7's two axes). Defaults to the absent-key
         // default at construction; SetInfoVisibleSeconds clamps like SetStopBlinkLimit.
         private int infoVisibleSeconds;
+        // v0.2.8 remote alerts: the remote-signal filter level (SettingsStore.RemoteAlerts*),
+        // applied ONLY to a REMOTE signal whose match run found no window (a background
+        // alert for a session this machine is not viewing). Local signals and matched
+        // remote signals (a tab this machine IS viewing) are never filtered.
+        private string remoteAlerts = SettingsStore.DefaultRemoteAlerts;
         // Single-writer discipline: inFlight, pending and activeOverlays are mutated only
         // on the UI thread (the timer ticks and the marshalled completion) — the queue-work
         // thread never touches them, so no cross-thread fence is needed.
@@ -205,7 +210,7 @@ namespace TerminalOrganizer.App
         /// </summary>
         internal static AttentionController CreateProduction(LogSink log, Control marshallingControl,
             string signalDirectory, bool enabled, string eventPolicy, int stopBlinkLimit, bool topmost,
-            int infoVisibleSeconds)
+            int infoVisibleSeconds, string remoteAlerts)
         {
             AttentionSignalStore store = new AttentionSignalStore(signalDirectory,
                 delegate { return UtcNowEpochMs(); });
@@ -234,6 +239,8 @@ namespace TerminalOrganizer.App
             // SPEC-TRAY-016 (REQ-PREF-001): the loaded info visible-seconds cap rides the
             // same production wiring as the other attention options (clamped again).
             controller.SetInfoVisibleSeconds(infoVisibleSeconds);
+            // v0.2.8: the loaded remote-alerts level (parsed again inside the setter).
+            controller.SetRemoteAlerts(remoteAlerts);
             return controller;
         }
 
@@ -311,6 +318,18 @@ namespace TerminalOrganizer.App
             get { return topmostMode; }
         }
 
+        /// <summary>v0.2.8: sets the remote-alerts level (all|asks|off); unknown tokens degrade to asks.</summary>
+        public void SetRemoteAlerts(string value)
+        {
+            remoteAlerts = SettingsStore.ParseRemoteAlerts(value);
+        }
+
+        /// <summary>The current remote-alerts level (one of all|asks|off).</summary>
+        public string RemoteAlerts
+        {
+            get { return remoteAlerts; }
+        }
+
         /// <summary>One poll tick: consume the directory, log rejected/stale lines, queue a match run.</summary>
         public void PollTick()
         {
@@ -378,7 +397,14 @@ namespace TerminalOrganizer.App
                     continue;
                 }
                 // Card ask-sound: only a signal that survived the disabled switch and the event policy plays.
-                PlayAskSound(signals[i]);
+                // v0.2.8: level off also silences the ask sound for REMOTE signals (this machine
+                // opted out of background alerts); a local ask keeps every cue, and a matched
+                // remote tab rings below regardless of this gate.
+                if (!(signals[i].Remote
+                    && string.Equals(remoteAlerts, SettingsStore.RemoteAlertsOff, StringComparison.Ordinal)))
+                {
+                    PlayAskSound(signals[i]);
+                }
                 pending.Add(signals[i]);
             }
             if (!inFlight && pending.Count > 0)
@@ -769,8 +795,18 @@ namespace TerminalOrganizer.App
             // leave no cue at all. The organizer therefore raises the fallback cue itself: a tray notice
             // through the injected seam, once per needle per cooldown. Only signals that reached this match
             // run get here, so the disabled switch and the event policy have already filtered the rest.
-            string noticeFailure;
-            string noticeOutcome = RaiseZeroMatchNotice(signal, out noticeFailure);
+            // v0.2.8 remote alerts: a REMOTE signal with no window is a background alert for a session
+            // this machine is not viewing — the remote-alerts level decides whether it surfaces here.
+            string noticeFailure = null;
+            string noticeOutcome;
+            if (signal.Remote && SuppressRemoteZeroMatchNotice(signal.Kind))
+            {
+                noticeOutcome = "tray notice skipped, remote " + remoteAlerts;
+            }
+            else
+            {
+                noticeOutcome = RaiseZeroMatchNotice(signal, out noticeFailure);
+            }
             Log("attention: event=" + signal.Event + " needle=\"" + signal.Needle
                 + "\" matched=0 (no window; " + noticeOutcome + ")");
             if (noticeFailure != null)
@@ -799,6 +835,19 @@ namespace TerminalOrganizer.App
         {
             zeroMatchNotice = notice;
             zeroMatchClock = nowMs;
+        }
+
+        /// <summary>v0.2.8 remote alerts: whether a REMOTE signal's zero-match tray notice is filtered
+        /// at the current level — off drops every remote notice; asks keeps only ask-kind signals
+        /// (the session waits on the user). Local signals are never routed through here.</summary>
+        private bool SuppressRemoteZeroMatchNotice(string kind)
+        {
+            if (string.Equals(remoteAlerts, SettingsStore.RemoteAlertsOff, StringComparison.Ordinal))
+            {
+                return true;
+            }
+            return string.Equals(remoteAlerts, SettingsStore.RemoteAlertsAsks, StringComparison.Ordinal)
+                && !string.Equals(kind, KindAsk, StringComparison.Ordinal);
         }
 
         // t18: the zero-match notice seam, its clock and the per-needle last-notice time (UI thread only).

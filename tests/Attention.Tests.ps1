@@ -64,6 +64,33 @@ Describe 'AC-001 Signal parser (REQ-SIG-001)' {
         $result.Signal.NotificationType | Should BeExactly 'permission'
     }
 
+    It 'R1 a remote-pushed payload (wsl-toast v1.6.1 carries "remote": true) records Remote true' {
+        $json = '{"version":1,"event":"stop","needle":"hooks","remote":true}'
+        $result = [TerminalOrganizer.Core.Attention.AttentionSignalParser]::Parse($json)
+        $result.Accepted | Should Be $true
+        $result.Signal.Remote | Should Be $true
+    }
+
+    It 'R2 a local payload (no remote key) records Remote false' {
+        $result = [TerminalOrganizer.Core.Attention.AttentionSignalParser]::Parse($script:P1)
+        $result.Accepted | Should Be $true
+        $result.Signal.Remote | Should Be $false
+    }
+
+    It 'R3 an explicit remote false records Remote false' {
+        $json = '{"version":1,"event":"stop","needle":"hooks","remote":false}'
+        $result = [TerminalOrganizer.Core.Attention.AttentionSignalParser]::Parse($json)
+        $result.Accepted | Should Be $true
+        $result.Signal.Remote | Should Be $false
+    }
+
+    It 'R4 a non-bool remote value degrades to false and never rejects (additive-field rule)' {
+        $json = '{"version":1,"event":"stop","needle":"hooks","remote":"yes"}'
+        $result = [TerminalOrganizer.Core.Attention.AttentionSignalParser]::Parse($json)
+        $result.Accepted | Should Be $true
+        $result.Signal.Remote | Should Be $false
+    }
+
     It 'P3 version 2 is rejected with the version reason' {
         $json = '{"version":2,"event":"stop","notification_type":null,"session_id":"s-1","cwd":"/home/j/hooks","needle":"hooks","timestamp":"2026-10-31T09:00:00Z"}'
         $result = [TerminalOrganizer.Core.Attention.AttentionSignalParser]::Parse($json)

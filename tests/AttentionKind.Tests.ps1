@@ -605,8 +605,8 @@ Describe 'AC-008 settings key: default, clamp, five-value carry (REQ-PREF-001)' 
         }
     }
 
-    It 'AppSettings carries exactly the 18 shipped properties (the AM-4 re-based count)' {
-        ([TerminalOrganizer.App.AppSettings].GetProperties().Count) | Should Be 19
+    It 'AppSettings carries exactly the 19 shipped properties (the AM-4 re-based count, + v0.2.8 remote alerts)' {
+        ([TerminalOrganizer.App.AppSettings].GetProperties().Count) | Should Be 20
     }
 
     It '(a) per-site guard: each of the three TrayContext save constructions carries AttentionInfoVisibleSeconds' {
