@@ -12,6 +12,15 @@ $repoRoot = Split-Path -Parent $here
 $script:HelperPs51 = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 $script:HelperScript = Join-Path $repoRoot 'tools\update-helper.ps1'
 
+# v0.2.9 follow-up: the helper writes its failure marker to a REAL location by
+# default (%LOCALAPPDATA%\TerminalOrganizer\update-failed.txt) — the suite must
+# never leak one into it (a leaked marker surfaced as a false "update failed"
+# prompt on the user's machine 2026-11-07 16:30). Redirect EVERY helper run in
+# this suite to a per-run scratch path; the env var dies with the Pester process.
+# The two AC-007b rows override it per fixture for their own assertions.
+$script:MarkerRedirect = Join-Path $here ('scratch-helper-marker-' + [Guid]::NewGuid().ToString('N'))
+$env:TERMINALORGANIZER_UPDATE_FAILED_MARKER = $script:MarkerRedirect
+
 # --- fixtures ---
 
 # One local git fixture: bare origin, an app clone at commit A (tracking the stand-in
@@ -191,7 +200,9 @@ Describe 'AC-007b failure marker: the reason reaches the next app run (v0.2.9)' 
             @([IO.File]::ReadAllLines($marker)).Count | Should Be 1
         }
         finally {
-            Remove-Item Env:TERMINALORGANIZER_UPDATE_FAILED_MARKER -ErrorAction SilentlyContinue
+            # Restore the SUITE redirect (not a bare remove — the leak guard below
+            # depends on every later run still being redirected).
+            $env:TERMINALORGANIZER_UPDATE_FAILED_MARKER = $script:MarkerRedirect
             Remove-UpdateFixture $f.Scratch
         }
     }
@@ -207,7 +218,8 @@ Describe 'AC-007b failure marker: the reason reaches the next app run (v0.2.9)' 
             (Test-Path $marker) | Should Be $false
         }
         finally {
-            Remove-Item Env:TERMINALORGANIZER_UPDATE_FAILED_MARKER -ErrorAction SilentlyContinue
+            # Restore the SUITE redirect (this row overrode it per fixture).
+            $env:TERMINALORGANIZER_UPDATE_FAILED_MARKER = $script:MarkerRedirect
             Remove-UpdateFixture $f.Scratch
         }
     }
@@ -442,5 +454,16 @@ Describe 'scratch hygiene: this suite leaves no fixture folders behind' {
         $left = @(Get-ChildItem $here -Directory -Filter 'scratch-*' |
             Where-Object { $_.Name -match '^scratch-(updatehelper|helperlog)-' })
         ($left | ForEach-Object { $_.Name }) -join ', ' | Should BeExactly ''
+    }
+
+    It 'no failure marker leaks into the production location (v0.2.9 follow-up)' {
+        # The suite-wide redirect captured every helper write: the last failure
+        # (the never-exits PID row writes "no update was attempted") must be in the
+        # REDIRECT file — which proves nothing touched the real %LOCALAPPDATA% path.
+        # Order-canary: a row reordering changes the last write; fix the expectation
+        # alongside. The redirect file is then removed (it is a file, not a fixture dir).
+        (Test-Path $script:MarkerRedirect) | Should Be $true
+        ([IO.File]::ReadAllText($script:MarkerRedirect)) | Should Match 'no update was attempted'
+        Remove-Item -Force $script:MarkerRedirect -ErrorAction SilentlyContinue
     }
 }
