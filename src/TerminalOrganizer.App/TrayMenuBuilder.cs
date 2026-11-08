@@ -1083,18 +1083,22 @@ namespace TerminalOrganizer.App
             return policy == null ? string.Empty : policy;
         }
 
-        /// <summary>v0.2.8: the display name of one remote-alerts token; unknown degrades to the asks label.</summary>
-        private static string RemoteAlertsDisplayName(string token)
+        /// <summary>v0.2.8: the display name of one remote-alerts token; unknown degrades to the asks label.
+        /// v0.2.11 critique: user language, not producer vocabulary — "ask" is the signal kind,
+        /// the user-facing word is a decision waiting on them; "All alerts" disambiguates from
+        /// the Event policy row's "All" shown next to it. Internal: the settings form's
+        /// radio row uses the same names (the shared-derivation rule).</summary>
+        internal static string RemoteAlertsDisplayName(string token)
         {
             if (string.Equals(token, SettingsStore.RemoteAlertsAll, StringComparison.Ordinal))
             {
-                return "All";
+                return "All alerts";
             }
             if (string.Equals(token, SettingsStore.RemoteAlertsOff, StringComparison.Ordinal))
             {
                 return "Off";
             }
-            return "Asks only";
+            return "Decisions only";
         }
 
         private static TrayMenuEntry[] BuildOverflowChildren(TrayMenuState state)

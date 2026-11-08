@@ -57,6 +57,8 @@ namespace TerminalOrganizer.App
         private readonly RadioButton[] remoteAlertRows;
         private readonly RadioButton[] overflowRows;
         private readonly ComboBox managerChoice;
+        private readonly System.Windows.Forms.Label savedLabel;
+        private readonly Timer savedTimer;
         private bool suppressEvents;
 
         /// <summary>
@@ -106,15 +108,15 @@ namespace TerminalOrganizer.App
             policyCaption.Text = "Event policy:";
             attentionGroup.Controls.Add(policyCaption);
 
-            int[] policyLefts = new int[] { 120, 190, 260 };
-            this.policyRows = new RadioButton[PolicyTokens.Length];
-            for (int i = 0; i < PolicyTokens.Length; i++)
+            // v0.2.11 critique fix (P1 + P3): each radio row lives in its OWN Panel.
+            // WinForms makes every RadioButton in one container a single exclusive group,
+            // so the three rows in one GroupBox left only one of the nine checked on
+            // screen (probe-verified) and keyboard arrows crossed all three settings.
+            // Panels restore one group per setting; all three rows now share one column
+            // start instead of three different x-rhythms.
+            this.policyRows = BuildRadioRow(attentionGroup, 52, PolicyTokens.Length, delegate(int i, RadioButton row)
             {
                 string token = PolicyTokens[i];
-                RadioButton row = new RadioButton();
-                row.AutoSize = true;
-                row.Left = policyLefts[i];
-                row.Top = 54;
                 row.CheckedChanged += delegate
                 {
                     if (row.Checked)
@@ -122,8 +124,13 @@ namespace TerminalOrganizer.App
                         ApplyAttentionPolicy(token);
                     }
                 };
-                attentionGroup.Controls.Add(row);
-                this.policyRows[i] = row;
+            });
+            for (int i = 0; i < PolicyTokens.Length; i++)
+            {
+                this.policyRows[i].Text = PolicyTokens[i] == AttentionPolicyResolver.PolicyMixed ? "Mixed"
+                    : PolicyTokens[i] == AttentionPolicyResolver.PolicyAll ? "All"
+                    : "Notifications only";
+                this.policyRows[i].Left = 0 + i * 68;
             }
 
             System.Windows.Forms.Label blinkCaption = new System.Windows.Forms.Label();
@@ -133,15 +140,9 @@ namespace TerminalOrganizer.App
             blinkCaption.Text = "Stop blinks:";
             attentionGroup.Controls.Add(blinkCaption);
 
-            int[] blinkLefts = new int[] { 120, 162, 204 };
-            this.blinkRows = new RadioButton[AttentionBlinkLimits.Shipped.Length];
-            for (int i = 0; i < AttentionBlinkLimits.Shipped.Length; i++)
+            this.blinkRows = BuildRadioRow(attentionGroup, 82, AttentionBlinkLimits.Shipped.Length, delegate(int i, RadioButton row)
             {
                 int limit = AttentionBlinkLimits.Shipped[i];
-                RadioButton row = new RadioButton();
-                row.AutoSize = true;
-                row.Left = blinkLefts[i];
-                row.Top = 84;
                 row.CheckedChanged += delegate
                 {
                     if (row.Checked)
@@ -149,8 +150,11 @@ namespace TerminalOrganizer.App
                         ApplyAttentionBlinkLimit(limit);
                     }
                 };
-                attentionGroup.Controls.Add(row);
-                this.blinkRows[i] = row;
+            });
+            for (int i = 0; i < this.blinkRows.Length; i++)
+            {
+                this.blinkRows[i].Text = AttentionBlinkLimits.Shipped[i].ToString(CultureInfo.InvariantCulture);
+                this.blinkRows[i].Left = 0 + i * 44;
             }
 
             System.Windows.Forms.Label remoteCaption = new System.Windows.Forms.Label();
@@ -160,15 +164,9 @@ namespace TerminalOrganizer.App
             remoteCaption.Text = "Remote alerts:";
             attentionGroup.Controls.Add(remoteCaption);
 
-            int[] remoteLefts = new int[] { 120, 180, 225 };
-            this.remoteAlertRows = new RadioButton[RemoteAlertTokens.Length];
-            for (int i = 0; i < RemoteAlertTokens.Length; i++)
+            this.remoteAlertRows = BuildRadioRow(attentionGroup, 112, RemoteAlertTokens.Length, delegate(int i, RadioButton row)
             {
                 string token = RemoteAlertTokens[i];
-                RadioButton row = new RadioButton();
-                row.AutoSize = true;
-                row.Left = remoteLefts[i];
-                row.Top = 114;
                 row.CheckedChanged += delegate
                 {
                     if (row.Checked)
@@ -176,8 +174,14 @@ namespace TerminalOrganizer.App
                         ApplyAttentionRemoteAlerts(token);
                     }
                 };
-                attentionGroup.Controls.Add(row);
-                this.remoteAlertRows[i] = row;
+            });
+            for (int i = 0; i < this.remoteAlertRows.Length; i++)
+            {
+                this.remoteAlertRows[i].Text = TrayMenuBuilder.RemoteAlertsDisplayName(RemoteAlertTokens[i]);
+                // "Decisions only" is the widest label of the three rows — the offsets
+                // leave clear air after it before "Off" (the user-reported spacing fix).
+                int[] remoteLefts = new int[] { 0, 102, 205 };
+                this.remoteAlertRows[i].Left = remoteLefts[i];
             }
 
             this.attentionTopmost = new CheckBox();
@@ -240,11 +244,63 @@ namespace TerminalOrganizer.App
             managerGroup.Controls.Add(this.managerChoice);
             Controls.Add(managerGroup);
 
+            // v0.2.11 critique fix (P3): write-through saves are silent; a brief
+            // "Saved" acknowledgment answers "did that stick?" without a save button.
+            this.savedLabel = new System.Windows.Forms.Label();
+            this.savedLabel.AutoSize = true;
+            this.savedLabel.Left = 16;
+            this.savedLabel.Top = 402;
+            this.savedLabel.Text = "Saved";
+            this.savedLabel.Visible = false;
+            Controls.Add(this.savedLabel);
+            this.savedTimer = new Timer();
+            this.savedTimer.Interval = 1500;
+            this.savedTimer.Tick += delegate
+            {
+                this.savedTimer.Stop();
+                this.savedLabel.Visible = false;
+            };
+
             // Resync on every activation: the values shown re-read the store, so a
             // change made from the tray menu while this modeless form stayed open is
             // picked up the moment the user returns to the form.
             Activated += delegate { RefreshFromSettings(); };
             RefreshFromSettings();
+        }
+
+        /// <summary>v0.2.11 critique fix (P1): one radio row = one Panel. WinForms treats
+        /// every RadioButton sharing a container as ONE exclusive group, so three settings
+        /// rows in one GroupBox left only one of the nine checked on screen (probe-verified)
+        /// and keyboard arrows crossed all three settings. All rows share the same panel
+        /// geometry so the three rows read as aligned columns (the P3 rhythm fix).</summary>
+        private static RadioButton[] BuildRadioRow(GroupBox parent, int top, int count,
+            Action<int, RadioButton> wire)
+        {
+            Panel row = new Panel();
+            row.Left = 110;
+            row.Top = top;
+            row.Width = 300;
+            row.Height = 30;
+            RadioButton[] buttons = new RadioButton[count];
+            for (int i = 0; i < count; i++)
+            {
+                RadioButton button = new RadioButton();
+                button.AutoSize = true;
+                button.Top = 4;
+                wire(i, button);
+                row.Controls.Add(button);
+                buttons[i] = button;
+            }
+            parent.Controls.Add(row);
+            return buttons;
+        }
+
+        /// <summary>Flashes the brief Saved acknowledgment (the write-through confirmation).</summary>
+        private void FlashSaved()
+        {
+            this.savedLabel.Visible = true;
+            this.savedTimer.Stop();
+            this.savedTimer.Start();
         }
 
         /// <summary>
@@ -317,21 +373,46 @@ namespace TerminalOrganizer.App
         /// The manager candidates are the built menu model's own SetManager rows
         /// (labels, checked markers and window keys included — no second candidate
         /// logic); "(none)" is the clear affordance, mirroring Clear manager.
+        /// v0.2.11 critique fix (P2): the combo renders items through ToString, and
+        /// TrayMenuEntry.ToString is "kind|label" — entries are wrapped so the user
+        /// sees the window label, never the internal kind token.
         /// </summary>
         private void PopulateManagerChoices(TrayMenuState state)
         {
             this.managerChoice.Items.Clear();
             this.managerChoice.Items.Add("(none)");
-            TrayMenuEntry checkedRow = null;
+            ManagerChoiceItem checkedItem = null;
             foreach (TrayMenuEntry candidate in CollectManagerCandidates(state))
             {
-                this.managerChoice.Items.Add(candidate);
+                ManagerChoiceItem item = new ManagerChoiceItem(candidate);
+                this.managerChoice.Items.Add(item);
                 if (candidate.Checked)
                 {
-                    checkedRow = candidate;
+                    checkedItem = item;
                 }
             }
-            this.managerChoice.SelectedItem = checkedRow != null ? (object)checkedRow : (object)"(none)";
+            this.managerChoice.SelectedItem = checkedItem != null ? (object)checkedItem : (object)"(none)";
+        }
+
+        /// <summary>v0.2.11: the combo display item — ToString is the window label.</summary>
+        private sealed class ManagerChoiceItem
+        {
+            private readonly TrayMenuEntry entry;
+
+            public ManagerChoiceItem(TrayMenuEntry entry)
+            {
+                this.entry = entry;
+            }
+
+            public TrayMenuEntry Entry
+            {
+                get { return entry; }
+            }
+
+            public override string ToString()
+            {
+                return entry.Label;
+            }
         }
 
         /// <summary>Collects the built model's SetManager rows (recursively — the
@@ -377,6 +458,7 @@ namespace TerminalOrganizer.App
                 this.attention.SetEnabled(written);
             }
             this.log.Append(written ? "attention overlay enabled" : "attention overlay disabled");
+            FlashSaved();
             RefreshFromSettings();
         }
 
@@ -392,6 +474,7 @@ namespace TerminalOrganizer.App
                 this.attention.SetEventPolicy(token);
             }
             this.log.Append("attention overlay event policy set to " + token);
+            FlashSaved();
             RefreshFromSettings();
         }
 
@@ -408,6 +491,7 @@ namespace TerminalOrganizer.App
             }
             this.log.Append("attention overlay stop blinks set to "
                 + limit.ToString(CultureInfo.InvariantCulture));
+            FlashSaved();
             RefreshFromSettings();
         }
 
@@ -426,6 +510,7 @@ namespace TerminalOrganizer.App
                 this.attention.SetRemoteAlerts(token);
             }
             this.log.Append("attention remote alerts set to " + token);
+            FlashSaved();
             RefreshFromSettings();
         }
 
@@ -443,6 +528,7 @@ namespace TerminalOrganizer.App
             }
             this.log.Append(value ? "attention overlay always on top enabled"
                 : "attention overlay always on top disabled");
+            FlashSaved();
             RefreshFromSettings();
         }
 
@@ -455,6 +541,7 @@ namespace TerminalOrganizer.App
             OverflowPolicy policy = TrayShell.ParsePolicyValue(id);
             TrayShell.SaveOverflowPolicyTo(this.settings, policy);
             this.log.Append("overflow policy set to " + policy);
+            FlashSaved();
             RefreshFromSettings();
         }
 
@@ -467,16 +554,17 @@ namespace TerminalOrganizer.App
             {
                 return;
             }
-            TrayMenuEntry selected = this.managerChoice.SelectedItem as TrayMenuEntry;
+            ManagerChoiceItem selected = this.managerChoice.SelectedItem as ManagerChoiceItem;
             if (selected != null)
             {
-                this.shell.SelectManagerFromSettingsForm(selected.WindowKey);
+                this.shell.SelectManagerFromSettingsForm(selected.Entry.WindowKey);
             }
             else if (this.managerChoice.SelectedItem is string)
             {
                 TrayShell.SaveManagerSelectorTo(this.settings, ManagerSelector.None());
                 this.log.Append("manager window cleared");
             }
+            FlashSaved();
             RefreshFromSettings();
         }
     }
