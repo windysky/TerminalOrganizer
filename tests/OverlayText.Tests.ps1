@@ -15,7 +15,10 @@ $appExe = Join-Path $repoRoot 'bin\TerminalOrganizer.App.exe'
 
 # Byte-load keeps the files unlocked so build.ps1 can rebuild while this session runs.
 [void][Reflection.Assembly]::Load([IO.File]::ReadAllBytes($coreDll))
-[void][Reflection.Assembly]::Load([IO.File]::ReadAllBytes($appExe))
+# Captured (not [void]) for the 2026-11-07 ScalePx reflection rows: the panel form is
+# App-internal, so its PURE static helper is invoked through the loaded assembly
+# (no WinForms surface runs under Pester — A3 still holds; this is arithmetic only).
+$script:AppAssembly = [Reflection.Assembly]::Load([IO.File]::ReadAllBytes($appExe))
 
 $script:OverlayCsPath = Join-Path $repoRoot 'src\TerminalOrganizer.App\AttentionOverlay.cs'
 $script:PanelCsPath = Join-Path $repoRoot 'src\TerminalOrganizer.App\AttentionMessagePanel.cs'
@@ -179,13 +182,38 @@ Describe 'AC-009 message layout and truncation' {
         $c::MessageCloseSizePx | Should Be 16
     }
 
-    It 'paints the amber accent as a full border on all four edges, not only a left stripe (2026-11-05 dark-terminal fix)' {
+    It 'paints the amber accent as a full border on all four edges, scaled to the target DPI (2026-11-05 dark-terminal fix; re-pinned 2026-11-07 for the laptop-scaling fix)' {
         $src = Read-Source $script:PanelCsPath
-        $src.Contains('int border = AttentionConstants.MessageAccentPx;') | Should Be $true
+        $src.Contains('int border = accentPx;') | Should Be $true
         $src.Contains('FillRectangle(accent, 0, 0, width, border)') | Should Be $true
         $src.Contains('FillRectangle(accent, 0, height - border, width, border)') | Should Be $true
         $src.Contains('FillRectangle(accent, 0, 0, border, height)') | Should Be $true
         $src.Contains('FillRectangle(accent, width - border, 0, border, height)') | Should Be $true
+    }
+
+    It 'scales the panel typography to the target monitor DPI: the pinned constants stay the 96-DPI baseline (2026-11-07 laptop-scaling fix)' {
+        $src = Read-Source $script:PanelCsPath
+        $src.Contains('int dpi = DpiOfWindow(targetHandle);') | Should Be $true
+        $src.Contains('fontPx = ScalePx(AttentionConstants.MessageFontPx, dpi);') | Should Be $true
+        $src.Contains('paddingPx = ScalePx(AttentionConstants.MessagePaddingPx, dpi);') | Should Be $true
+        $src.Contains('closeSizePx = ScalePx(AttentionConstants.MessageCloseSizePx, dpi);') | Should Be $true
+        $src.Contains('accentPx = ScalePx(AttentionConstants.MessageAccentPx, dpi);') | Should Be $true
+        $src.Contains('new Font(FontFamily.GenericSansSerif, fontPx,') | Should Be $true
+    }
+
+    It 'ScalePx maps the pinned 96-DPI baseline to the target DPI (never shrinks, degrades to baseline)' {
+        $panelType = $script:AppAssembly.GetType('TerminalOrganizer.App.AttentionMessagePanelForm')
+        if ($null -eq $panelType) { throw 'AttentionMessagePanelForm type not found in the loaded App assembly' }
+        $scale = $panelType.GetMethod('ScalePx', [Reflection.BindingFlags]'Static,Public,NonPublic')
+        if ($null -eq $scale) { throw 'ScalePx static not found on the panel form' }
+        $scale.Invoke($null, @(14, 0)) | Should Be 14
+        $scale.Invoke($null, @(14, 96)) | Should Be 14
+        $scale.Invoke($null, @(14, 120)) | Should Be 18
+        $scale.Invoke($null, @(14, 144)) | Should Be 21
+        # 14 * 168/96 = 24.5 -> Math.Round banker's rounding picks the even 24
+        $scale.Invoke($null, @(14, 168)) | Should Be 24
+        $scale.Invoke($null, @(16, 144)) | Should Be 24
+        $scale.Invoke($null, @(10, 144)) | Should Be 15
     }
 
     It 'pins the section-J color constants (panel 0x1E1E1E, text 0xEEEEEE)' {

@@ -52,6 +52,14 @@ namespace TerminalOrganizer.App
         private readonly IntPtr target;
         private readonly bool topmostMode;
         private readonly Font textFont;
+        // DPI-scaled geometry (the 2026-11-07 laptop-scaling fix): the pinned
+        // AttentionConstants stay the 96-DPI baseline; these carry the same values
+        // multiplied by the target monitor's DPI factor so a scaled display
+        // (125%/150%) renders the card at the same PHYSICAL size as 100%.
+        private readonly int fontPx;
+        private readonly int paddingPx;
+        private readonly int closeSizePx;
+        private readonly int accentPx;
         private readonly TextBox text;
         private bool desktopHidden;
         private bool userClosed;
@@ -70,9 +78,18 @@ namespace TerminalOrganizer.App
             // The solid near-black card: NO TransparencyKey — the whole form is solid
             // (the ring's key trick does not apply to a text surface).
             BackColor = RgbColor(AttentionConstants.MessagePanelBackRgb);
-            // Pixel-exact typography (NFR-7): the form lives in physical pixels, so the
-            // font is sized in GraphicsUnit.Pixel — no point/DPI math anywhere.
-            textFont = new Font(FontFamily.GenericSansSerif, AttentionConstants.MessageFontPx,
+            // Pixel-exact typography (NFR-7, amended 2026-11-07): the form lives in
+            // physical pixels and the font stays GraphicsUnit.Pixel, but the pinned
+            // sizes are now the 96-DPI BASELINE, scaled by the target monitor's DPI
+            // factor — a 150% laptop renders 14px as 21 physical px so the card keeps
+            // its physical size (the original "no DPI math" wording covered only the
+            // 100%-scaling monitors it was designed on).
+            int dpi = DpiOfWindow(targetHandle);
+            fontPx = ScalePx(AttentionConstants.MessageFontPx, dpi);
+            paddingPx = ScalePx(AttentionConstants.MessagePaddingPx, dpi);
+            closeSizePx = ScalePx(AttentionConstants.MessageCloseSizePx, dpi);
+            accentPx = ScalePx(AttentionConstants.MessageAccentPx, dpi);
+            textFont = new Font(FontFamily.GenericSansSerif, fontPx,
                 FontStyle.Regular, GraphicsUnit.Pixel);
             text = new TextBox();
             text.Multiline = true;
@@ -229,7 +246,7 @@ namespace TerminalOrganizer.App
             }
             using (SolidBrush accent = new SolidBrush(RgbColor(AttentionConstants.RingColorRgb)))
             {
-                int border = AttentionConstants.MessageAccentPx;
+                int border = accentPx;
                 e.Graphics.FillRectangle(accent, 0, 0, width, border);
                 e.Graphics.FillRectangle(accent, 0, height - border, width, border);
                 e.Graphics.FillRectangle(accent, 0, 0, border, height);
@@ -237,7 +254,7 @@ namespace TerminalOrganizer.App
             }
             using (Pen glyphPen = new Pen(RgbColor(AttentionConstants.MessageTextRgb)))
             {
-                int inset = AttentionConstants.MessageCloseSizePx / 4;
+                int inset = closeSizePx / 4;
                 e.Graphics.DrawLine(glyphPen,
                     closeGlyph.Left + inset, closeGlyph.Top + inset,
                     closeGlyph.Right - inset, closeGlyph.Bottom - inset);
@@ -279,7 +296,7 @@ namespace TerminalOrganizer.App
             text.Text = prepared;
             // t13: the kind-scoped text color (ask red / info amber / default near-white).
             text.ForeColor = RgbColor(AttentionMessageStyle.TextColorRgbForKind(kind));
-            int interiorWidth = (quad[2] - quad[0]) - 2 * AttentionConstants.MessagePaddingPx;
+            int interiorWidth = (quad[2] - quad[0]) - 2 * paddingPx;
             if (interiorWidth < 1)
             {
                 interiorWidth = 1;
@@ -290,7 +307,7 @@ namespace TerminalOrganizer.App
             Rectangle workArea = Screen.FromHandle(target).WorkingArea;
             int[] workRect = new int[] { workArea.Left, workArea.Top, workArea.Right, workArea.Bottom };
             int[] place = AttentionMessageLayout.PlacePanel(quad, workRect, measured.Width, measured.Height);
-            int placedInterior = place[2] - 2 * AttentionConstants.MessagePaddingPx;
+            int placedInterior = place[2] - 2 * paddingPx;
             if (placedInterior >= 1 && placedInterior < interiorWidth)
             {
                 // t11: the card was capped narrower than the target interior — re-wrap
@@ -302,15 +319,15 @@ namespace TerminalOrganizer.App
                     TextFormatFlags.WordBreak | TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.NoPrefix);
                 place = AttentionMessageLayout.PlacePanel(quad, workRect, preferredWidth, measured.Height);
             }
-            int surfaceWidth = place[2] - 2 * AttentionConstants.MessagePaddingPx;
+            int surfaceWidth = place[2] - 2 * paddingPx;
             if (surfaceWidth < 1)
             {
                 surfaceWidth = 1;
             }
-            text.SetBounds(AttentionConstants.MessagePaddingPx, AttentionConstants.MessagePaddingPx,
+            text.SetBounds(paddingPx, paddingPx,
                 surfaceWidth, measured.Height);
-            closeGlyph = new Rectangle(place[2] - AttentionConstants.MessageCloseSizePx, 0,
-                AttentionConstants.MessageCloseSizePx, AttentionConstants.MessageCloseSizePx);
+            closeGlyph = new Rectangle(place[2] - closeSizePx, 0,
+                closeSizePx, closeSizePx);
             Native.SetWindowPos(Handle, AboveTargetInsertAfter(topmostMode, target),
                 place[0], place[1], place[2], place[3], (uint)SwpNoactivate);
             // M2b (SPEC-TRAY-018): the panel never goes through Form.Show(), so the
@@ -367,6 +384,35 @@ namespace TerminalOrganizer.App
             [DllImport("user32.dll", SetLastError = true)] public static extern bool SetWindowPos(IntPtr window, IntPtr insertAfter, int x, int y, int width, int height, uint flags); // every call passes SwpNoactivate (SWP_NOACTIVATE)
             [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr window, int command);
             [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr GetWindow(IntPtr window, uint command);
+            [DllImport("user32.dll")] public static extern int GetDpiForWindow(IntPtr window); // Win10 1607+; the safe wrapper below falls back to 96
+        }
+
+        /// <summary>The target window's DPI (96 when the API is unavailable or the handle
+        /// is dead). Never throws — a pre-1607 entry-point miss or a zero return keeps the
+        /// unscaled 96-DPI baseline rendering.</summary>
+        internal static int DpiOfWindow(IntPtr hwnd)
+        {
+            try
+            {
+                int dpi = Native.GetDpiForWindow(hwnd);
+                return dpi > 0 ? dpi : 96;
+            }
+            catch
+            {
+                return 96;
+            }
+        }
+
+        /// <summary>Scales a pinned 96-DPI pixel constant to the given DPI. The pinned
+        /// constants stay untouched (SPEC doctrine: no value edits); this multiplies.
+        /// DPI at or below 96 returns the baseline unchanged (never shrinks).</summary>
+        internal static int ScalePx(int px96, int dpi)
+        {
+            if (dpi <= 96)
+            {
+                return px96;
+            }
+            return (int)Math.Round(px96 * (double)dpi / 96.0);
         }
     }
 }
