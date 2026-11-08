@@ -4160,6 +4160,19 @@ function Get-R10LastArg([string]$Text) {
     $Text.Substring($last).Trim()
 }
 
+# Returns the call's second argument: the text before the first depth-1 comma of an
+# argument-list text that starts after the consumed `ports.Controller.Labels,` anchor.
+function Get-R10SecondArg([string]$Text) {
+    $depth = 0
+    for ($i = 0; $i -lt $Text.Length; $i++) {
+        $ch = [string]$Text[$i]
+        if ($ch -ceq '(' -or $ch -ceq '{' -or $ch -ceq '[') { $depth++ }
+        elseif ($ch -ceq ')' -or $ch -ceq '}' -or $ch -ceq ']') { $depth-- }
+        elseif ($ch -ceq ',' -and $depth -eq 0) { return $Text.Substring(0, $i).Trim() }
+    }
+    $Text.Trim()
+}
+
 Describe 'SPEC-RULES-010 AC-008 ReportRuleTimeouts: first test, one line per rule position' {
     It 'skipped evaluations add no line; repeats and a second compose add none; a new position adds exactly one; null inputs are safe' {
         $composition = [TerminalOrganizer.App.AppSettings].Assembly.GetType('TerminalOrganizer.App.Composition')
@@ -4176,25 +4189,25 @@ Describe 'SPEC-RULES-010 AC-008 ReportRuleTimeouts: first test, one line per rul
         @($diags | Where-Object { $_.Position -eq 42 }).Count | Should Be 3
         @($diags | Where-Object { $_.Reason -ceq 'regex timeout (skipped after repeated timeouts)' }).Count | Should Be 2
 
-        [void]$report.Invoke($null, [object[]]@($snaps, $sink))
+        [void]$report.Invoke($null, [object[]]@($snaps, $l1, $sink))
         $script:R10Lines.Count | Should Be 2
         $script:R10Lines[0] | Should BeExactly 'title rule 41 timed out; treated as no match'
         $script:R10Lines[1] | Should BeExactly 'title rule 42 timed out; treated as no match'
 
         foreach ($repeat in 1..3) {
-            [void]$report.Invoke($null, [object[]]@($snaps, $sink))
+            [void]$report.Invoke($null, [object[]]@($snaps, $l1, $sink))
         }
         $script:R10Lines.Count | Should Be 2
 
         $again = New-R10Snapshots $l1 1
         @($again | ForEach-Object { $_.RuleDiagnostics }).Count | Should Be 2
-        [void]$report.Invoke($null, [object[]]@($again, $sink))
+        [void]$report.Invoke($null, [object[]]@($again, $l1, $sink))
         $script:R10Lines.Count | Should Be 2
 
         $l2 = New-R10Rules 42 @('regex:^(a+)+$')
         $third = New-R10Snapshots $l2 1
         @($third | ForEach-Object { $_.RuleDiagnostics }).Count | Should Be 1
-        [void]$report.Invoke($null, [object[]]@($third, $sink))
+        [void]$report.Invoke($null, [object[]]@($third, $l2, $sink))
         $script:R10Lines.Count | Should Be 3
         $script:R10Lines[2] | Should BeExactly 'title rule 43 timed out; treated as no match'
     }
@@ -4205,12 +4218,13 @@ Describe 'SPEC-RULES-010 AC-008 ReportRuleTimeouts: first test, one line per rul
         $script:R10Lines = New-Object 'System.Collections.Generic.List[string]'
         $sink = [Action[string]] { param($m) $script:R10Lines.Add($m) }
         $withNull = [Array]::CreateInstance([TerminalOrganizer.Core.Windows.WindowSnapshot], 1)
-        $snaps = New-R10Snapshots (New-R10Rules 40 @('regex:^(a+)+$')) 1
+        $l1 = New-R10Rules 40 @('regex:^(a+)+$')
+        $snaps = New-R10Snapshots $l1 1
         $caught = $null
         try {
-            [void]$report.Invoke($null, [object[]]@($snaps, $null))
-            [void]$report.Invoke($null, [object[]]@($null, $sink))
-            [void]$report.Invoke($null, [object[]]@($withNull, $sink))
+            [void]$report.Invoke($null, [object[]]@($snaps, $l1, $null))
+            [void]$report.Invoke($null, [object[]]@($null, $l1, $sink))
+            [void]$report.Invoke($null, [object[]]@($withNull, $l1, $sink))
         }
         catch {
             $caught = $_
@@ -4223,20 +4237,21 @@ Describe 'SPEC-RULES-010 AC-008 ReportRuleTimeouts: first test, one line per rul
 Describe 'SPEC-RULES-010 AC-009 the menu read logs rule timeouts and nothing else' {
     $text = [IO.File]::ReadAllText((Join-Path $repoRoot 'src\TerminalOrganizer.App\TrayContext.cs'))
 
-    It 'ReadWindowsForMenu has exactly two parameters: a LabelRegistry and an Action of string' {
+    It 'ReadWindowsForMenu has exactly three parameters: a LabelRegistry, an AppSettings and an Action of string' {
         $composition = [TerminalOrganizer.App.AppSettings].Assembly.GetType('TerminalOrganizer.App.Composition')
         $method = $composition.GetMethod('ReadWindowsForMenu', [Reflection.BindingFlags]'NonPublic,Static')
         $method | Should Not BeNullOrEmpty
         $params = $method.GetParameters()
-        $params.Count | Should Be 2
+        $params.Count | Should Be 3
         $params[0].ParameterType.Name | Should BeExactly 'LabelRegistry'
-        ($params[1].ParameterType -eq [Action[string]]) | Should Be $true
+        $params[1].ParameterType.Name | Should BeExactly 'AppSettings'
+        ($params[2].ParameterType -eq [Action[string]]) | Should Be $true
     }
 
-    It 'the body reports through ReportRuleTimeouts with its second parameter, and the Discover trace argument stays the literal null' {
-        $decl = [regex]::Match($text, 'DiscoveredWindows\s+ReadWindowsForMenu\s*\(\s*LabelRegistry\s+\w+\s*,\s*Action<string>\s+(\w+)\s*\)\s*\{')
+    It 'the body reports through ReportRuleTimeouts with its sink parameter, and the Discover trace argument stays the literal null' {
+        $decl = [regex]::Match($text, 'DiscoveredWindows\s+ReadWindowsForMenu\s*\(\s*LabelRegistry\s+\w+\s*,\s*AppSettings\s+\w+\s*,\s*Action<string>\s+(\w+)\s*\)\s*\{')
         $decl.Success | Should Be $true
-        $sinkName = $decl.Groups[1].Value
+        $sinkName = $decl.Groups[2].Value
         $body = Get-R10Span $text ($decl.Index + $decl.Length) '{' '}'
         $body | Should Not BeNullOrEmpty
         ($body -match ('ReportRuleTimeouts\([^;]*\b' + $sinkName + '\b')) | Should Be $true
@@ -4247,27 +4262,169 @@ Describe 'SPEC-RULES-010 AC-009 the menu read logs rule timeouts and nothing els
         (Get-R10LastArg $discoverArgs) | Should BeExactly 'null'
     }
 
-    It 'each of the three call sites passes a second argument that is not null and reaches log.Append' {
+    It 'each of the three call sites passes a settings identifier and a sink that is not null and reaches log.Append' {
         $sites = [regex]::Matches($text, 'ReadWindowsForMenu\(ports\.Controller\.Labels,')
         $sites.Count | Should Be 3
         foreach ($site in $sites) {
-            $span = (Get-R10Span $text ($site.Index + $site.Length) '(' ')').Trim()
-            $span | Should Not BeNullOrEmpty
-            ($span -match '^null\b') | Should Be $false
-            $direct = $span -match 'log\.Append\b'
+            $list = (Get-R10Span $text ($site.Index + $site.Length) '(' ')')
+            $list | Should Not BeNullOrEmpty
+            $sink = Get-R10LastArg $list
+            $sink | Should Not BeNullOrEmpty
+            ($sink -match '^null\b') | Should Be $false
+            $direct = $sink -match 'log\.Append\b'
             if (-not $direct) {
-                ($span -match '^[A-Za-z_][A-Za-z0-9_]*$') | Should Be $true
+                ($sink -match '^[A-Za-z_][A-Za-z0-9_]*$') | Should Be $true
                 $shellStart = $text.IndexOf('class TrayShell', [StringComparison]::Ordinal)
-                $helper = [regex]::Match($text.Substring($shellStart), '\b' + $span + '\s*\([^)]*\)\s*\{')
+                $helper = [regex]::Match($text.Substring($shellStart), '\b' + $sink + '\s*\([^)]*\)\s*\{')
                 $helper.Success | Should Be $true
                 $helperBody = Get-R10Span $text ($shellStart + $helper.Index + $helper.Length) '{' '}'
                 ($helperBody -match 'log\.Append\b') | Should Be $true
             }
+            $settingsArg = Get-R10SecondArg $list
+            ($settingsArg -match '^[A-Za-z_][A-Za-z0-9_]*$') | Should Be $true
+            ($settingsArg -ceq 'null') | Should Be $false
         }
     }
 
     It 'the organize run and the world capture still pass the app log as the discovery trace' {
         $kept = [regex]::Matches($text, 'ports\.RunToken,\s*delegate\(string message\)\s*\{\s*log\.Append\(message\);\s*\}\)')
         $kept.Count | Should BeGreaterThan 1
+    }
+}
+
+# --- SPEC-RULES-011 M1: one settings read per menu build (F5) ---
+# Expected values come from SPEC-RULES-011 spec.md AC-003/AC-004 and the amended SPEC-RULES-010
+# AC-009, never from the code under test.
+
+Describe 'SPEC-RULES-011 AC-003 ReadWindowsForMenu takes the caller settings read as its second parameter' {
+    It 'by reflection ReadWindowsForMenu has exactly 3 parameters: a LabelRegistry, an AppSettings and an Action of string' {
+        $composition = [TerminalOrganizer.App.AppSettings].Assembly.GetType('TerminalOrganizer.App.Composition')
+        $method = $composition.GetMethod('ReadWindowsForMenu', [Reflection.BindingFlags]'NonPublic,Static')
+        $method | Should Not BeNullOrEmpty
+        $params = $method.GetParameters()
+        $params.Count | Should Be 3
+        $params[0].ParameterType.Name | Should BeExactly 'LabelRegistry'
+        $params[1].ParameterType.Name | Should BeExactly 'AppSettings'
+        ($params[2].ParameterType -eq [Action[string]]) | Should Be $true
+    }
+}
+
+Describe 'SPEC-RULES-011 AC-004 one settings read per menu build and manager action (source pins)' {
+    $text = [IO.File]::ReadAllText((Join-Path $repoRoot 'src\TerminalOrganizer.App\TrayContext.cs'))
+
+    It 'the ReadWindowsForMenu body performs no settings read of its own and passes its settings parameter rule set to Discover' {
+        $decl = [regex]::Match($text, 'DiscoveredWindows\s+ReadWindowsForMenu\s*\(\s*LabelRegistry\s+\w+\s*,\s*AppSettings\s+(\w+)\s*,\s*Action<string>\s+\w+\s*\)\s*\{')
+        $decl.Success | Should Be $true
+        $settingsName = $decl.Groups[1].Value
+        $body = Get-R10Span $text ($decl.Index + $decl.Length) '{' '}'
+        $body | Should Not BeNullOrEmpty
+        ($body -match 'LoadSettings\(') | Should Be $false
+        ($body -match [regex]::Escape($settingsName + '.TitleRules.RuleSet')) | Should Be $true
+    }
+
+    It 'BuildMenu and ShowManagerWindow each hold exactly one settings read, CreateValidatedManager holds its own, each before the call' {
+        $shellStart = $text.IndexOf('class TrayShell', [StringComparison]::Ordinal)
+        $after = $text.Substring($shellStart)
+        foreach ($name in @('BuildMenu', 'CreateValidatedManager', 'ShowManagerWindow')) {
+            $m = [regex]::Match($after, '\b(private|internal)\s+\S+\s+' + $name + '\s*\([^)]*\)\s*\{')
+            $m.Success | Should Be $true
+            $body = Get-R10Span $text ($shellStart + $m.Index + $m.Length) '{' '}'
+            $body | Should Not BeNullOrEmpty
+            $loads = [regex]::Matches($body, 'settings\.Load\(\)')
+            $loads.Count | Should Be 1
+            $call = $body.IndexOf('ReadWindowsForMenu(', [StringComparison]::Ordinal)
+            ($call -ge 0) | Should Be $true
+            ($loads[0].Index -lt $call) | Should Be $true
+        }
+    }
+
+    It 'the source holds exactly 3 call expressions passing a bare settings identifier as the second argument' {
+        $sites = [regex]::Matches($text, 'ReadWindowsForMenu\(ports\.Controller\.Labels,\s*\w+,')
+        $sites.Count | Should Be 3
+    }
+}
+
+# --- SPEC-RULES-011 M2: definition-aware timeout dedupe key (F9) ---
+# Expected values come from SPEC-RULES-011 spec.md AC-001/AC-002 and the amended SPEC-RULES-010
+# REQ-LOG-001, never from the code under test.
+# RuleDiagnosticLog is process-wide and has no reset: this SPEC owns positions 51 to 53 and
+# must run once per fresh process (41 to 43 belong to SPEC-RULES-010 AC-008).
+
+Describe 'SPEC-RULES-011 AC-001 an edited match text at the same position logs exactly one new line' {
+    It 'skipped and repeated evaluations share one line; a different match text at position 51 adds exactly one line; a new position adds exactly one' {
+        $composition = [TerminalOrganizer.App.AppSettings].Assembly.GetType('TerminalOrganizer.App.Composition')
+        $report = $composition.GetMethod('ReportRuleTimeouts', [Reflection.BindingFlags]'NonPublic,Static')
+        $report | Should Not BeNullOrEmpty
+        $script:R11Lines = New-Object 'System.Collections.Generic.List[string]'
+        $sink = [Action[string]] { param($m) $script:R11Lines.Add($m) }
+
+        $l1 = New-R10Rules 50 @('regex:^(a+)+$')
+        $snaps = New-R10Snapshots $l1 3
+        $diags = @($snaps | ForEach-Object { $_.RuleDiagnostics })
+        $diags.Count | Should Be 3
+        @($diags | Where-Object { $_.Position -eq 51 }).Count | Should Be 3
+        @($diags | Where-Object { $_.Reason -ceq 'regex timeout (skipped after repeated timeouts)' }).Count | Should Be 1
+
+        [void]$report.Invoke($null, [object[]]@($snaps, $l1, $sink))
+        $script:R11Lines.Count | Should Be 1
+        $script:R11Lines[0] | Should BeExactly 'title rule 51 timed out; treated as no match'
+
+        foreach ($repeat in 1..3) {
+            [void]$report.Invoke($null, [object[]]@($snaps, $l1, $sink))
+        }
+        $again = New-R10Snapshots $l1 1
+        [void]$report.Invoke($null, [object[]]@($again, $l1, $sink))
+        $script:R11Lines.Count | Should Be 1
+
+        $l1edited = New-R10Rules 50 @('regex:^(a+)+c$')
+        $edited = New-R10Snapshots $l1edited 1
+        @($edited | ForEach-Object { $_.RuleDiagnostics }).Count | Should Be 1
+        [void]$report.Invoke($null, [object[]]@($edited, $l1edited, $sink))
+        $script:R11Lines.Count | Should Be 2
+
+        $l2 = New-R10Rules 51 @('regex:^(a+)+$')
+        $third = New-R10Snapshots $l2 1
+        [void]$report.Invoke($null, [object[]]@($third, $l2, $sink))
+        $script:R11Lines.Count | Should Be 3
+        $script:R11Lines[2] | Should BeExactly 'title rule 52 timed out; treated as no match'
+    }
+}
+
+Describe 'SPEC-RULES-011 AC-002 the key degrades to the line text when the rule set is missing or lacks the position' {
+    It 'a null rule set and a preset-only rule set write the degraded line once; the real rule set writes one more; null inputs stay safe' {
+        $composition = [TerminalOrganizer.App.AppSettings].Assembly.GetType('TerminalOrganizer.App.Composition')
+        $report = $composition.GetMethod('ReportRuleTimeouts', [Reflection.BindingFlags]'NonPublic,Static')
+        $script:R11Lines2 = New-Object 'System.Collections.Generic.List[string]'
+        $sink = [Action[string]] { param($m) $script:R11Lines2.Add($m) }
+
+        $l1 = New-R10Rules 52 @('regex:^(a+)+$')
+        $snaps = New-R10Snapshots $l1 1
+
+        [void]$report.Invoke($null, [object[]]@($snaps, $null, $sink))
+        $script:R11Lines2.Count | Should Be 1
+        $script:R11Lines2[0] | Should BeExactly 'title rule 53 timed out; treated as no match'
+        foreach ($repeat in 1..2) {
+            [void]$report.Invoke($null, [object[]]@($snaps, $null, $sink))
+        }
+        $script:R11Lines2.Count | Should Be 1
+
+        [void]$report.Invoke($null, [object[]]@($snaps, [TerminalOrganizer.Core.Rules.RuleSet]::PresetOnly(), $sink))
+        $script:R11Lines2.Count | Should Be 1
+
+        [void]$report.Invoke($null, [object[]]@($snaps, $l1, $sink))
+        $script:R11Lines2.Count | Should Be 2
+
+        $withNull = [Array]::CreateInstance([TerminalOrganizer.Core.Windows.WindowSnapshot], 1)
+        $caught = $null
+        try {
+            [void]$report.Invoke($null, [object[]]@($snaps, $l1, $null))
+            [void]$report.Invoke($null, [object[]]@($null, $l1, $sink))
+            [void]$report.Invoke($null, [object[]]@($withNull, $l1, $sink))
+        }
+        catch {
+            $caught = $_
+        }
+        $caught | Should BeNullOrEmpty
+        $script:R11Lines2.Count | Should Be 2
     }
 }

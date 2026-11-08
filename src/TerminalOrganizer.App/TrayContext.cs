@@ -431,19 +431,19 @@ namespace TerminalOrganizer.App
             return ports;
         }
 
-        /// <summary>The menu and the manager actions use the same fail-closed policy across all monitors (B2: facts + snapshots joined by handle). The menu path never carries a run token (B4).</summary>
+        /// <summary>The menu and the manager actions use the same fail-closed policy across all monitors (B2: facts + snapshots joined by handle). The menu path never carries a run token (B4).
+        /// The settings parameter is the caller's ONE settings read of this action (SPEC-RULES-011 F5): the rule set composed here and the default rank and overrides the caller uses for its rows come from one settings version. Callers never pass null.</summary>
         // @MX:NOTE: the sink receives rule timeouts only; the discovery trace stays null so the non-deduplicated UIA-probe and process-query lines never reach the log from the menu path (SPEC-RULES-010).
-        internal static DiscoveredWindows ReadWindowsForMenu(LabelRegistry labels, Action<string> ruleLog)
+        internal static DiscoveredWindows ReadWindowsForMenu(LabelRegistry labels, AppSettings settings, Action<string> ruleLog)
         {
-            // REQ-SET-004: every menu read rebuilds the rule set from its own settings read.
-            AppSettings read = LoadSettings(null);
+            // REQ-SET-004: every menu read rebuilds the rule set from the caller's one settings read of this action (F5: the read this menu build already made).
             DiscoveredWindows discovered = Discover(null, null, new Win32MonitorProvider(), new VirtualDesktopReader(),
                 new UiaProbeClient(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,
                     "TerminalOrganizer.UiaProbe.exe")),
                 new Win32WindowEnumerator(), new ProcessSessionQuery(),
-                new WindowStateReader(), labels, read.TitleRules.RuleSet, System.Threading.CancellationToken.None, null);
+                new WindowStateReader(), labels, settings.TitleRules.RuleSet, System.Threading.CancellationToken.None, null);
             // REQ-LOG-002: one line per rule position per process, through the shared deduplicating log.
-            ReportRuleTimeouts(discovered.Snapshots, ruleLog);
+            ReportRuleTimeouts(discovered.Snapshots, settings.TitleRules.RuleSet, ruleLog);
             return discovered;
         }
 
@@ -512,7 +512,7 @@ namespace TerminalOrganizer.App
                 },
                 delegate(WindowSnapshot[] snapshots) { return ApplyLabels(snapshots, labels); },
                 rules);
-            ReportRuleTimeouts(acquired.Snapshots, trace);
+            ReportRuleTimeouts(acquired.Snapshots, rules, trace);
             // The scoped input already passed the monitor/desktop checks, so re-stitch the
             // pre-scope skip counters onto the result (B3 status keeps its full sweep view).
             return new DiscoveredWindows(acquired.Facts, acquired.Snapshots,
@@ -520,14 +520,17 @@ namespace TerminalOrganizer.App
                 scope.SkippedOtherDesktop, scope.SkippedUnknownDesktop, acquired.SkippedUnknownStateCount);
         }
 
-        /// <summary>Writes one line per rule that timed out while evaluating a window, once per distinct rule and position (REQ-LOG-001).</summary>
-        // @MX:NOTE: the line text and the position-only dedupe key are pinned by tests (audit finding F9); changing the key needs its own SPEC. Executed and skipped diagnostics of one position share one line.
-        private static void ReportRuleTimeouts(WindowSnapshot[] snapshots, Action<string> trace)
+        /// <summary>Writes one line per rule that timed out while evaluating a window, once per distinct rule definition and position (REQ-LOG-001).</summary>
+        // @MX:NOTE: the line text is pinned by tests; the dedupe key is the line text plus the rule's definition reference at the diagnostic's position (SPEC-RULES-011, audit finding F9 fixed); a missing rule set or an absent rule at the position degrades the key to the line text alone. Executed and skipped diagnostics of one position share one line.
+        private static void ReportRuleTimeouts(WindowSnapshot[] snapshots, RuleSet rules, Action<string> trace)
         {
             if (trace == null || snapshots == null)
             {
                 return;
             }
+            // Captured once: Rules clones its array per access. Lookup by Position, never
+            // by array index — skipped malformed rules shift indices.
+            CompiledRule[] compiled = rules == null ? null : rules.Rules;
             foreach (WindowSnapshot snapshot in snapshots)
             {
                 if (snapshot == null)
@@ -538,7 +541,20 @@ namespace TerminalOrganizer.App
                 {
                     string line = "title rule " + diagnostic.Position.ToString(CultureInfo.InvariantCulture)
                         + " timed out; treated as no match";
-                    RuleDiagnosticLog.Report(trace, line, line);
+                    string reference = null;
+                    if (compiled != null)
+                    {
+                        foreach (CompiledRule rule in compiled)
+                        {
+                            if (rule.Position == diagnostic.Position)
+                            {
+                                reference = rule.Reference;
+                                break;
+                            }
+                        }
+                    }
+                    string key = reference == null ? line : line + " | " + reference;
+                    RuleDiagnosticLog.Report(trace, line, key);
                 }
             }
         }
@@ -866,7 +882,7 @@ namespace TerminalOrganizer.App
         private ContextMenuStrip BuildMenu()
         {
             AppSettings current = settings.Load();
-            DiscoveredWindows discovered = Composition.ReadWindowsForMenu(ports.Controller.Labels,
+            DiscoveredWindows discovered = Composition.ReadWindowsForMenu(ports.Controller.Labels, current,
                 delegate(string line) { log.Append(line); });
             ManagerSelector selector = current.ManagerSelector == null ? ManagerSelector.None() : current.ManagerSelector;
             ManagerResolution resolution = ManagerResolver.Resolve(selector, discovered.Facts, discovered.Snapshots);
@@ -1532,7 +1548,9 @@ namespace TerminalOrganizer.App
                 log.Append("set manager skipped: menu identity missing");
                 return null;
             }
-            WindowSnapshot[] fresh = Composition.ReadWindowsForMenu(ports.Controller.Labels,
+            // F5: the one settings read of this click (the rule set for discovery comes from it).
+            AppSettings read = settings.Load();
+            WindowSnapshot[] fresh = Composition.ReadWindowsForMenu(ports.Controller.Labels, read,
                 delegate(string line) { log.Append(line); }).Snapshots;
             WindowSnapshot match = null;
             bool multiple = false;
@@ -1601,7 +1619,7 @@ namespace TerminalOrganizer.App
                 {
                     return;
                 }
-                DiscoveredWindows discovered = Composition.ReadWindowsForMenu(ports.Controller.Labels,
+                DiscoveredWindows discovered = Composition.ReadWindowsForMenu(ports.Controller.Labels, current,
                     delegate(string line) { log.Append(line); });
                 ManagerResolution resolution = ManagerResolver.Resolve(selector, discovered.Facts, discovered.Snapshots);
                 if (resolution.Status != ManagerResolutionStatus.Resolved)
