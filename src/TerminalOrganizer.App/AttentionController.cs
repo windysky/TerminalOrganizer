@@ -855,7 +855,7 @@ namespace TerminalOrganizer.App
         private Func<long> zeroMatchClock;
         private readonly Dictionary<string, long> zeroMatchNoticedAt = new Dictionary<string, long>(StringComparer.Ordinal);
 
-        private const string ZeroMatchNoticeTitle = "Claude needs attention";
+        private const string ZeroMatchNoticeTitle = "A session needs attention";
         private const int ZeroMatchMessageMaxChars = 200;
         private const int ZeroMatchNeedleMaxChars = 100;
 
@@ -972,11 +972,17 @@ namespace TerminalOrganizer.App
             Log("attention: ask sound played needle=\"" + signal.Needle + "\"");
         }
 
-        /// <summary>The notice body: no window was found for the session, then the signal's message when it has one (one line, bounded).</summary>
+        /// <summary>The notice body: plain-language "needs attention but no window here" with
+        /// an action hint (another PC, or a detached tab), then the signal's message when it
+        /// has one (one line, bounded). The 2026-11-07 wording round replaced the developer
+        /// phrasing "No window was found for session X" — the notice is user-facing, not a
+        /// matcher diagnostic (the log line keeps the technical form).</summary>
         private static string ZeroMatchNoticeBody(AttentionSignal signal)
         {
             string needle = OneLine(signal.Needle, ZeroMatchNeedleMaxChars);
-            string body = "No window was found for session \"" + needle + "\".";
+            string body = "\"" + needle + "\" needs attention, but its window is not on this "
+                + "screen — it may be open on another PC, or its tab is detached "
+                + "(reattach: tmux attach -t " + needle + ").";
             string message = OneLine(signal.Message, ZeroMatchMessageMaxChars);
             return message.Length == 0 ? body : body + " " + message;
         }

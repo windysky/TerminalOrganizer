@@ -83,7 +83,11 @@ Describe 'Zero-match tray notice (card t18)' {
         Install-ZNotice $c
         Send-ZSignal $c (New-ZSignal 'stop' 'zzzneedle' 'Build finished')
         $script:ZNotices.Count | Should Be 1
-        $script:ZNotices[0] | Should Match '^Claude needs attention\|'
+        # 2026-11-07 wording round: title is session-generic (codex signals too), body
+        # is plain language with an action hint (another PC / detached tab reattach).
+        $script:ZNotices[0] | Should Match '^A session needs attention\|'
+        $script:ZNotices[0] | Should Match 'window is not on this screen'
+        $script:ZNotices[0] | Should Match 'tmux attach -t zzzneedle'
         $script:ZNotices[0] | Should Match 'zzzneedle'
         $script:ZNotices[0] | Should Match 'Build finished'
         (Get-ZPrimary)[0] | Should BeExactly 'attention: event=stop needle="zzzneedle" matched=0 (no window; tray notice shown)'
