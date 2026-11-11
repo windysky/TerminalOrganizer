@@ -5,7 +5,7 @@ namespace TerminalOrganizer.Core.Windows
 {
     /// <summary>
     /// Strips the launcher's window-name prefix from a tab title (REQ-TTL-001): exactly one
-    /// leading prefix of the form [OHNW][CGD]_ or [OHNW][CGD]&lt;digit&gt;_ — case-sensitive,
+    /// leading prefix of the form [OHNW][CGDA]_ or [OHNW][CGDA]&lt;digit&gt;_ — case-sensitive,
     /// uppercase classes, a SINGLE rank digit (C1; multi-digit needs a future grammar change).
     /// A title without a valid prefix returns unchanged; a second prefix survives (a
     /// window_name may itself contain '_'). An empty session title after a prefix is invalid

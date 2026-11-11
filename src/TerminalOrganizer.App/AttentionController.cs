@@ -386,6 +386,16 @@ namespace TerminalOrganizer.App
             }
             for (int i = 0; i < signals.Length; i++)
             {
+                // SPEC-TRAY-021 (REQ-WAK-002, D-3): a consumed stop resolves the pending ask
+                // waiting on the same normalized needle. Placed at the TOP of the loop, BEFORE
+                // the display filters below, so a policy-suppressed stop still resolves; local
+                // and remote stops alike; silent (the stop's own existing lines are the
+                // evidence). The disabled return above means stops arriving while disabled do
+                // not resolve (spec 2.2, the accepted frozen-window limitation).
+                if (string.Equals(signals[i].Event, "stop", StringComparison.Ordinal))
+                {
+                    pendingAsks.Remove(NeedleKey(signals[i].Needle));
+                }
                 // SPEC-TRAY-014 D-7 (REQ-CTL-001, A-8): under "notifications" a stop event is
                 // consumed and logged but never becomes pending — a pure stop batch skips the
                 // match run entirely. The disabled suppression above always wins.
@@ -411,6 +421,11 @@ namespace TerminalOrganizer.App
             {
                 StartRun();
             }
+            // SPEC-TRAY-021 (REQ-WAK-005, D-4): the pending-asks sweep rides the same poll
+            // tick -- no new timer, no new thread. It sits below the disabled return above,
+            // so a disabled controller never sweeps (entries freeze; the first enabled tick
+            // resynchronizes from the elapsed clock time, never a burst replay).
+            SweepPendingAsks();
         }
 
         /// <summary>
@@ -813,6 +828,17 @@ namespace TerminalOrganizer.App
             {
                 Log("attention: tray notice failed: " + noticeFailure);
             }
+            // SPEC-TRAY-021 (REQ-WAK-001, D-2): an ask that completed its match run with zero
+            // matches is a session WAITING on the user -- record it as a pending ask, keyed by
+            // the SAME normalized needle the cooldown maps use. Unconditional across local and
+            // remote and across the notice outcome above (the map is the record of the wait;
+            // the cue stays gated); a re-fire replaces the entry with the newest signal and
+            // both timestamps refreshed. Matched asks return before this branch, so they never
+            // register.
+            if (string.Equals(signal.Kind, KindAsk, StringComparison.Ordinal))
+            {
+                RegisterPendingAsk(signal);
+            }
             // SPEC-TRAY-019 (REQ-STM-005): one line per session-bearing window, naming its
             // stripped session titles — the zero-match dump (plan.md A-3).
             for (int i = 0; i < details.Length; i++)
@@ -970,6 +996,120 @@ namespace TerminalOrganizer.App
             }
             RememberNoticeTime(askSoundPlayedAt, key, now, AttentionConstants.AskSoundCooldownMs);
             Log("attention: ask sound played needle=\"" + signal.Needle + "\"");
+        }
+
+        // SPEC-TRAY-021 (D-1/D-2): the pending-asks map -- one entry per zero-match ask
+        // signal waiting on the user, keyed by the SAME normalized needle the cooldown maps
+        // use (NeedleKey above). UI-thread-only (the same discipline as zeroMatchNoticedAt),
+        // in-memory only (a restart clears it); the AskPendingMaxAgeMinutes expiry bounds its
+        // growth to one entry per distinct needle with an ask in the last 30 minutes.
+        private readonly Dictionary<string, PendingAsk> pendingAsks = new Dictionary<string, PendingAsk>(StringComparer.Ordinal);
+
+        /// <summary>SPEC-TRAY-021 (D-1): one waiting ask -- the recorded signal (needle,
+        /// message and remote flag verbatim; the re-notify cue replays it through the notice
+        /// body), the registration time (the waited= field and the expiry base; refreshed on
+        /// every re-fire) and the last-notify time (the re-notify cadence base; seeded at
+        /// registration).</summary>
+        private sealed class PendingAsk
+        {
+            public AttentionSignal Signal;
+            public long RegisteredAtMs;
+            public long LastNotifiedAtMs;
+        }
+
+        /// <summary>SPEC-TRAY-021 (A4): the pending-asks clock -- the SAME seam discipline the
+        /// zero-match notice reads, so one injected fake clock drives the cooldowns, the
+        /// registration timestamps and the sweep together (null uses the production
+        /// clock).</summary>
+        private long PendingAskNowMs()
+        {
+            return zeroMatchClock == null ? UtcNowEpochMs() : zeroMatchClock();
+        }
+
+        /// <summary>SPEC-TRAY-021 (REQ-WAK-001): registers or refreshes the pending-ask entry
+        /// for one zero-match ask -- one entry per normalized key; the newest ask replaces any
+        /// previous entry with BOTH timestamps refreshed (the wait counts from the newest ask,
+        /// the question the session is currently blocked on). Never logs, never throws.</summary>
+        private void RegisterPendingAsk(AttentionSignal signal)
+        {
+            long now = PendingAskNowMs();
+            PendingAsk entry = new PendingAsk();
+            entry.Signal = signal;
+            entry.RegisteredAtMs = now;
+            entry.LastNotifiedAtMs = now;
+            pendingAsks[NeedleKey(signal.Needle)] = entry;
+        }
+
+        /// <summary>
+        /// SPEC-TRAY-021 (REQ-WAK-005, D-4): one pending-asks sweep pass at the end of every
+        /// enabled poll tick. Per entry, EXPIRY FIRST -- an entry whose age since registration
+        /// reached AskPendingMaxAgeMinutes drops with one log line and never re-notifies --
+        /// then at most ONE re-notify for an entry whose last notify is at least
+        /// AskRenotifyMinutes old; missed boundaries are never replayed as a burst (the
+        /// cadence reads the clock seam, not tick counts). Never throws.
+        /// </summary>
+        private void SweepPendingAsks()
+        {
+            if (pendingAsks.Count == 0)
+            {
+                return;
+            }
+            long now = PendingAskNowMs();
+            List<string> expiredKeys = null;
+            foreach (KeyValuePair<string, PendingAsk> pair in pendingAsks)
+            {
+                if (now - pair.Value.RegisteredAtMs >= AttentionConstants.AskPendingMaxAgeMinutes * 60000L)
+                {
+                    if (expiredKeys == null)
+                    {
+                        expiredKeys = new List<string>();
+                    }
+                    expiredKeys.Add(pair.Key);
+                    continue;
+                }
+                if (now - pair.Value.LastNotifiedAtMs >= AttentionConstants.AskRenotifyMinutes * 60000L)
+                {
+                    RenotifyPendingAsk(pair.Value, now);
+                }
+            }
+            if (expiredKeys != null)
+            {
+                for (int i = 0; i < expiredKeys.Count; i++)
+                {
+                    PendingAsk expired = pendingAsks[expiredKeys[i]];
+                    pendingAsks.Remove(expiredKeys[i]);
+                    Log("attention: ask expired needle=\"" + expired.Signal.Needle + "\"");
+                }
+            }
+        }
+
+        /// <summary>
+        /// SPEC-TRAY-021 (REQ-WAK-003/007, D-5): re-raises the zero-match cue for one pending
+        /// ask and stamps the sweep line. The cue routes through the SAME helpers and
+        /// per-needle cooldown maps as the original paths, with BOTH call-site gates
+        /// replicated here (the shared helpers contain neither): the notice gate of
+        /// LogSignal's zero-match branch (the remote-alerts level) and the sound gate of the
+        /// PollTick consume loop (remote off) -- an ungated re-notify under remote=off is the
+        /// defect this replication exists to prevent. At the pinned 5-minute cadence neither
+        /// cooldown can suppress a boundary re-notify; they guard re-fires only. The sweep
+        /// line is UNCONDITIONAL: it marks the pending state, not the balloon outcome.
+        /// </summary>
+        private void RenotifyPendingAsk(PendingAsk entry, long now)
+        {
+            entry.LastNotifiedAtMs = now;
+            long waitedMinutes = (now - entry.RegisteredAtMs) / 60000L;
+            Log("attention: ask re-notify needle=\"" + entry.Signal.Needle + "\" waited="
+                + waitedMinutes.ToString(CultureInfo.InvariantCulture) + "m");
+            if (!(entry.Signal.Remote && SuppressRemoteZeroMatchNotice(entry.Signal.Kind)))
+            {
+                string noticeFailure;
+                RaiseZeroMatchNotice(entry.Signal, out noticeFailure);
+            }
+            if (!(entry.Signal.Remote
+                && string.Equals(remoteAlerts, SettingsStore.RemoteAlertsOff, StringComparison.Ordinal)))
+            {
+                PlayAskSound(entry.Signal);
+            }
         }
 
         /// <summary>The notice body: plain-language "needs attention but no window here" with

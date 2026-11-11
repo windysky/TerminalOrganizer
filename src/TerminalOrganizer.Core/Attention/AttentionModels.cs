@@ -49,6 +49,21 @@ namespace TerminalOrganizer.Core.Attention
         /// (normalized as the matcher does) within this many milliseconds.</summary>
         public const long AskSoundCooldownMs = 10000;
 
+        /// <summary>SPEC-TRAY-021 (plan.md section J): a pending zero-match ask re-raises the
+        /// zero-match cue once this many minutes have passed since its last notify without a
+        /// stop resolving it (REQ-WAK-003). At this pinned cadence neither per-needle cooldown
+        /// can suppress a boundary re-notify (300 s over the 60 s notice and 10 s sound
+        /// cooldowns); they guard re-fires only.</summary>
+        // @MX:NOTE: pinned constant (SPEC-TRAY-021 plan.md section J); changing the value is a SPEC amendment.
+        public const int AskRenotifyMinutes = 5;
+
+        /// <summary>SPEC-TRAY-021 (plan.md section J): a pending ask with no stop expires --
+        /// dropped with one log line and no final re-notify -- at this many minutes since its
+        /// NEWEST ask (REQ-WAK-004; a re-fire refreshes the registration, so the bound reads
+        /// how long the session has waited on its current question).</summary>
+        // @MX:NOTE: pinned constant (SPEC-TRAY-021 plan.md section J); changing the value is a SPEC amendment.
+        public const int AskPendingMaxAgeMinutes = 30;
+
         // @MX:NOTE: SPEC-TRAY-016 message-constant block (plan.md section J): the pinned
         // panel geometry/typography set — changing any value here is a SPEC amendment,
         // never a tuning knob (the same doctrine as every constant above).

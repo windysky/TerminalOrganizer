@@ -58,7 +58,7 @@ Describe 'AC-001 Prefix stripping' {
 }
 
 # --- C1: declared-rank title grammar (night-design-2026-09-25 unit C1) ---
-# Grammar: [OHNW][CGD] + optional single digit + '_', then a NON-EMPTY session title.
+# Grammar: [OHNW][CGDA] + optional single digit + '_', then a NON-EMPTY session title.
 
 Describe 'C1 declared-rank title grammar' {
     It 'C1 parses legacy prefix without rank' {
@@ -74,6 +74,20 @@ Describe 'C1 declared-rank title grammar' {
         $n.SessionTitle | Should BeExactly 'YODA1'
         $n.PrefixPresent | Should Be $true
         $n.DeclaredRank | Should Be 2
+    }
+
+    It 'C1 parses the Antigravity model letter A (launcher v0.59.0 agyD)' {
+        $n = [TerminalOrganizer.Core.Windows.TitleNormalizer]::Parse('OA_YODA1')
+        $n.SessionTitle | Should BeExactly 'YODA1'
+        $n.PrefixPresent | Should Be $true
+        $n.DeclaredRank | Should BeNullOrEmpty
+        $n = [TerminalOrganizer.Core.Windows.TitleNormalizer]::Parse('HA2_YODA1')
+        $n.SessionTitle | Should BeExactly 'YODA1'
+        $n.DeclaredRank | Should Be 2
+        # A lowercase or unknown model letter still does not count as a prefix.
+        foreach ($bad in @('Oa_YODA1', 'OB_YODA1')) {
+            [TerminalOrganizer.Core.Windows.TitleNormalizer]::Parse($bad).PrefixPresent | Should Be $false
+        }
     }
 
     It 'C1 strips exactly one prefix' {

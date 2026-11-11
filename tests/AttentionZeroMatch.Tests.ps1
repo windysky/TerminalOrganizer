@@ -294,3 +294,179 @@ Describe 'Zero-match remote filter (v0.2.8 remote alerts)' {
         $c.Dispose()
     }
 }
+
+# SPEC-TRAY-021: an empty poll tick - drives the pending-ask sweep with no consumed signal.
+function Tick-ZEmpty($Controller) {
+    $script:ZNext = New-ZPoll
+    $Controller.PollTick()
+}
+
+Describe 'Waiting-ask re-notification (SPEC-TRAY-021)' {
+    # A zero-match ask (kind "ask", no window on this machine) is a session WAITING on the
+    # user; the single t18 balloon is easy to miss and nothing ever re-fires it. The controller
+    # now records each one as a pending ask (one entry per normalized needle, newest ask wins),
+    # resolves it silently on the session's next stop, re-raises the cue every
+    # AskRenotifyMinutes, and drops it at AskPendingMaxAgeMinutes with one log line.
+    # Expected values come from the card, never from the code under test.
+
+    It 'the pinned constants are named and set (AskRenotifyMinutes 5, AskPendingMaxAgeMinutes 30)' {
+        [TerminalOrganizer.Core.Attention.AttentionConstants]::AskRenotifyMinutes | Should Be 5
+        [TerminalOrganizer.Core.Attention.AttentionConstants]::AskPendingMaxAgeMinutes | Should Be 30
+    }
+
+    It 'a re-fired ask replaces the entry: one slot per normalized needle, the boundary resyncs to the newest ask' {
+        $c = New-ZController
+        Install-ZNotice $c
+        Install-ZSound $c
+        Send-ZSignal $c (New-ZSignal 'notification' 'jang_proj' 'first question' 'ask')
+        $script:ZNow += 120000              # T+2m: the SAME normalized key, a newer message
+        Send-ZSignal $c (New-ZSignal 'notification' 'JANG proj' 'second question' 'ask')
+        Tick-ZEmpty $c                       # 0 m since the refresh: silent
+        @($script:ZLog | Where-Object { $_ -like 'attention: ask re-notify*' }).Count | Should Be 0
+        $script:ZNow += 300000              # T+7m total = 5 m since the refreshed registration
+        Tick-ZEmpty $c
+        $renotify = @($script:ZLog | Where-Object { $_ -like 'attention: ask re-notify*' })
+        $renotify.Count | Should Be 1
+        $renotify[0] | Should BeExactly 'attention: ask re-notify needle="JANG proj" waited=5m'
+        $script:ZNotices.Count | Should Be 3
+        $script:ZNotices[2] | Should Match 'second question'   # the newest ask is what the balloon carries
+        $c.Dispose()
+    }
+
+    It 'a matched ask never becomes pending: no re-notify or expiry line for it' {
+        $c = New-ZController
+        Install-ZNotice $c
+        Install-ZSound $c
+        Send-ZSignal $c (New-ZSignal 'notification' 'alpha' $null 'ask')
+        $script:ZNow += 1800000             # T+30m: past every boundary
+        Tick-ZEmpty $c
+        @($script:ZLog | Where-Object { $_ -like 'attention: ask re-notify needle="alpha"*' -or $_ -like 'attention: ask expired needle="alpha"*' }).Count | Should Be 0
+        $c.Dispose()
+    }
+
+    It 'a stop resolves the pending ask in every shape: local under all, policy-suppressed under notifications, and remote' {
+        $shapes = @(
+            @{ Policy = 'all'; Remote = $false },
+            @{ Policy = 'notifications'; Remote = $false },
+            @{ Policy = 'all'; Remote = $true }
+        )
+        foreach ($shape in $shapes) {
+            $c = New-ZController $shape.Policy
+            Install-ZNotice $c
+            Install-ZSound $c
+            $ask = New-ZSignal 'notification' 'zzzneedle' $null 'ask'
+            if ($shape.Remote) { $ask.Remote = $true }
+            Send-ZSignal $c $ask
+            $script:ZNow += 60000              # T+1m
+            $stop = New-ZSignal 'stop' 'zzzneedle'
+            if ($shape.Remote) { $stop.Remote = $true }
+            Send-ZSignal $c $stop
+            $script:ZNow += 1800000            # T+31m: every boundary past, the entry must be gone
+            Tick-ZEmpty $c
+            @($script:ZLog | Where-Object { $_ -like 'attention: ask re-notify*' }).Count | Should Be 0
+            @($script:ZLog | Where-Object { $_ -like 'attention: ask expired*' }).Count | Should Be 0
+            $c.Dispose()
+        }
+    }
+
+    It 'a pending ask re-notifies at each 5-minute boundary: balloon + sound + one line, never cooldown-suppressed' {
+        $c = New-ZController
+        Install-ZNotice $c
+        Install-ZSound $c
+        Send-ZSignal $c (New-ZSignal 'notification' 'zzzneedle' $null 'ask')   # T: the original cue
+        $script:ZNow += 300000              # T+5m
+        Tick-ZEmpty $c
+        $script:ZNotices.Count | Should Be 2
+        $script:ZSounds.Count | Should Be 2
+        $script:ZNow += 300000              # T+10m
+        Tick-ZEmpty $c
+        $script:ZNotices.Count | Should Be 3
+        $script:ZSounds.Count | Should Be 3
+        $renotify = @($script:ZLog | Where-Object { $_ -like 'attention: ask re-notify*' })
+        $renotify.Count | Should Be 2
+        $renotify[0] | Should BeExactly 'attention: ask re-notify needle="zzzneedle" waited=5m'
+        $renotify[1] | Should BeExactly 'attention: ask re-notify needle="zzzneedle" waited=10m'
+        $script:ZNotices[1] | Should Match '^A session needs attention\|'   # same title/body shape as the original
+        $script:ZNotices[1] | Should Match 'zzzneedle'
+        $c.Dispose()
+    }
+
+    It 'exactly five re-notify boundaries, then expiry at 30m with no sixth re-notify (expiry runs first)' {
+        $c = New-ZController
+        Install-ZNotice $c
+        Install-ZSound $c
+        Send-ZSignal $c (New-ZSignal 'notification' 'zzzneedle' $null 'ask')
+        foreach ($minute in @(5, 10, 15, 20, 25)) {
+            $script:ZNow += 300000
+            Tick-ZEmpty $c
+        }
+        $renotify = @($script:ZLog | Where-Object { $_ -like 'attention: ask re-notify*' })
+        $renotify.Count | Should Be 5
+        $renotify[4] | Should BeExactly 'attention: ask re-notify needle="zzzneedle" waited=25m'
+        @($script:ZLog | Where-Object { $_ -like 'attention: ask expired*' }).Count | Should Be 0
+        $script:ZNow += 300000              # T+30m: the max-age boundary itself
+        Tick-ZEmpty $c
+        $expired = @($script:ZLog | Where-Object { $_ -like 'attention: ask expired*' })
+        $expired.Count | Should Be 1
+        $expired[0] | Should BeExactly 'attention: ask expired needle="zzzneedle"'
+        @($script:ZLog | Where-Object { $_ -like 'attention: ask re-notify*' }).Count | Should Be 5   # no sixth
+        $script:ZNotices.Count | Should Be 6   # the original + five re-notifies, none at expiry
+        $script:ZNow += 300000              # the entry is gone: later ticks stay silent
+        Tick-ZEmpty $c
+        @($script:ZLog | Where-Object { $_ -like 'attention: ask re-notify*' }).Count | Should Be 5
+        @($script:ZLog | Where-Object { $_ -like 'attention: ask expired*' }).Count | Should Be 1
+        $c.Dispose()
+    }
+
+    It 'a disabled window freezes the sweep: the entry survives, no burst, exactly ONE resync re-notify on re-enable' {
+        $c = New-ZController
+        Install-ZNotice $c
+        Install-ZSound $c
+        Send-ZSignal $c (New-ZSignal 'notification' 'zzzneedle' $null 'ask')   # T
+        $script:ZNow += 180000              # T+3m: attention off (the T+5m and T+10m boundaries will be missed)
+        $c.SetEnabled($false)
+        $script:ZNow += 540000              # T+12m
+        Tick-ZEmpty $c
+        @($script:ZLog | Where-Object { $_ -like 'attention: ask re-notify*' -or $_ -like 'attention: ask expired*' }).Count | Should Be 0
+        $c.SetEnabled($true)
+        Tick-ZEmpty $c                       # the first enabled tick resynchronizes from the clock
+        $renotify = @($script:ZLog | Where-Object { $_ -like 'attention: ask re-notify*' })
+        $renotify.Count | Should Be 1
+        $renotify[0] | Should BeExactly 'attention: ask re-notify needle="zzzneedle" waited=12m'
+        $script:ZNotices.Count | Should Be 2   # the original balloon + exactly ONE resync balloon
+        $c.Dispose()
+    }
+
+    It 'remote off still tracks: the re-notify lines log on every boundary while both cues stay gated' {
+        $c = New-ZController
+        $c.SetRemoteAlerts('off')
+        Install-ZNotice $c
+        Install-ZSound $c
+        Send-ZSignal $c (New-ZSignal 'notification' 'zzzneedle' $null 'ask' -Remote)   # T: no balloon, no sound
+        $script:ZNotices.Count | Should Be 0
+        $script:ZSounds.Count | Should Be 0
+        $script:ZNow += 300000              # T+5m
+        Tick-ZEmpty $c
+        $renotify = @($script:ZLog | Where-Object { $_ -like 'attention: ask re-notify*' })
+        $renotify.Count | Should Be 1
+        $renotify[0] | Should BeExactly 'attention: ask re-notify needle="zzzneedle" waited=5m'
+        $script:ZNow += 300000              # T+10m
+        Tick-ZEmpty $c
+        @($script:ZLog | Where-Object { $_ -like 'attention: ask re-notify*' }).Count | Should Be 2
+        $script:ZNotices.Count | Should Be 0
+        $script:ZSounds.Count | Should Be 0
+        $c.Dispose()
+    }
+
+    It 'no seams installed: registering and sweeping a pending ask does not throw (the production clock ticks)' {
+        $c = New-ZController
+        $caught = $null
+        try {
+            Send-ZSignal $c (New-ZSignal 'notification' 'zzzneedle' $null 'ask')
+            Tick-ZEmpty $c
+            Tick-ZEmpty $c
+        } catch { $caught = $_ }
+        $caught | Should BeNullOrEmpty
+        $c.Dispose()
+    }
+}

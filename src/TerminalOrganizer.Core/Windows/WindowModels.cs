@@ -190,7 +190,7 @@ namespace TerminalOrganizer.Core.Windows
         /// <summary>The session title: stripped when a valid prefix was present, else the original.</summary>
         public string SessionTitle { get { return sessionTitle; } }
 
-        /// <summary>True only when a valid [OHNW][CGD][digit?]_ prefix was stripped.</summary>
+        /// <summary>True only when a valid [OHNW][CGDA][digit?]_ prefix was stripped.</summary>
         public bool PrefixPresent { get { return prefixPresent; } }
 
         /// <summary>The single declared rank digit (0-9); lower means higher priority. Null when absent.</summary>

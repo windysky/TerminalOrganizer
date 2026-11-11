@@ -6,7 +6,7 @@ namespace TerminalOrganizer.Core.Rules
 {
     /// <summary>
     /// The built-in preset launcher-prefix (REQ-PRE-001): the launcher's title grammar as a rule.
-    /// One leading token of a family letter from O H N W, a context letter from C G D, an optional
+    /// One leading token of a family letter from O H N W, a context letter from C G D A, an optional
     /// single ASCII digit and '_', followed by a non-empty session title; case-sensitive. The session
     /// title is the identity name (later underscores kept) and the digit is the rank. The expression
     /// runs without a match timeout on purpose: its shape is linear, and a bound would make session
@@ -22,7 +22,7 @@ namespace TerminalOrganizer.Core.Rules
         public const string Reference = "preset launcher-prefix";
 
         /// <summary>The grammar (plan.md J.1).</summary>
-        public const string Pattern = @"^(?<family>[OHNW])(?<context>[CGD])(?<rank>[0-9])?_(?<name>[\s\S]+)\z";
+        public const string Pattern = @"^(?<family>[OHNW])(?<context>[CGDA])(?<rank>[0-9])?_(?<name>[\s\S]+)\z";
 
         private static readonly Regex PresetRegex =
             new Regex(Pattern, RegexOptions.CultureInvariant, Regex.InfiniteMatchTimeout);
